@@ -1,0 +1,52 @@
+# ============================================================
+# 零售目标测算 · 全局配置（口径 + 情景参数）
+# 改完重跑：.venv/bin/python main.py run
+# ============================================================
+
+# ---------- 口径 ----------
+caliber:
+  new_customer_window_days: 365   # 新客定义：下单前365天内无购买 → 新客（滚动口径）
+  baseline_months: 12             # 基线窗口：取最近N个月历史做测算基期
+  tier_scope: platform            # 款梯队划分范围：platform=平台内统一排 | category=品类内排
+  tier_pareto_pct: 0.78           # 单款GMV降序、累计占比不超过该值 → 爆款
+  tier_tail_pct: 0.20             # GMV末段累计占比不超过该值 → 尾部
+  goods_window_months: 12         # 货维度结构基期（品类×梯队取最近N个月）
+  new_product_days: 90            # 首次售卖距基期末 ≤90天 → 记为新品（不参与帕累托）
+
+# ---------- 测算期 ----------
+target:
+  months: 12                      # 自历史最后一月的下月起，测算未来N个月
+
+# ---------- 三档情景参数 ----------
+# 增速为基期年化口径。人/场/货三组参数分别驱动三个视角，结果在交叉校验表互验。
+scenarios:
+  保守:
+    new_customers_growth: 0.03    # 人：新客数
+    new_arpu_growth: 0.00         # 人：新客人均产出
+    old_customers_growth: -0.02   # 人：老客月活
+    old_freq_growth: 0.02         # 人：老客复购频次
+    old_aov_growth: 0.00          # 人：老客客单
+    uv_growth: 0.02               # 场：UV（仅有流量数据的平台生效）
+    cvr_growth: 0.00              # 场：转化率
+    aov_growth: 0.00              # 场：整体客单
+    tier_growth: {爆款: 0.00, 腰部: 0.05, 尾部: -0.15, 新品: 0.05}   # 货：各梯队
+  基准:
+    new_customers_growth: 0.10
+    new_arpu_growth: 0.01
+    old_customers_growth: 0.01
+    old_freq_growth: 0.04
+    old_aov_growth: 0.01
+    uv_growth: 0.08
+    cvr_growth: 0.01
+    aov_growth: 0.01
+    tier_growth: {爆款: 0.03, 腰部: 0.12, 尾部: -0.10, 新品: 0.20}
+  挑战:
+    new_customers_growth: 0.18
+    new_arpu_growth: 0.02
+    old_customers_growth: 0.03
+    old_freq_growth: 0.07
+    old_aov_growth: 0.02
+    uv_growth: 0.15
+    cvr_growth: 0.02
+    aov_growth: 0.02
+    tier_growth: {爆款: 0.05, 腰部: 0.20, 尾部: -0.05, 新品: 0.35}
