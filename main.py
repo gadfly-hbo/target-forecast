@@ -4,6 +4,7 @@
 用法：
     .venv/bin/python main.py demo       # 生成演示数据并跑通全流程（首次体验用）
     .venv/bin/python main.py run        # 用 data/ 下的正式数据测算
+    .venv/bin/python main.py serve      # 启动本地 HTML 工作台（--port 指定端口）
     .venv/bin/python main.py templates  # 重新生成输入模板
 """
 
@@ -17,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from target_forecast import aggregate, demo, engine, ingest_agg, ingest_detail, report, templates
+from target_forecast import aggregate, demo, engine, ingest_agg, ingest_detail, report, server, templates
 
 ROOT = Path(__file__).resolve().parent
 OUT_DIR = ROOT / "output"
@@ -101,11 +102,15 @@ def run_flow(cfg: dict, demo_flag: bool) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="零售目标测算（线上 · 人货场）")
-    ap.add_argument("command", choices=["demo", "run", "templates"], help="demo=演示数据跑通 | run=正式测算 | templates=生成输入模板")
+    ap.add_argument("command", choices=["demo", "run", "serve", "templates"],
+                    help="demo=演示数据跑通 | run=正式测算 | serve=本地工作台 | templates=生成输入模板")
+    ap.add_argument("--port", type=int, default=8300, help="serve 模式端口（默认 8300）")
     args = ap.parse_args()
     cfg = load_cfg()
     if args.command == "templates":
         templates.build(ROOT)
+    elif args.command == "serve":
+        server.serve(ROOT, port=args.port)
     elif args.command == "demo":
         demo.generate(ROOT)
         with warnings.catch_warnings(record=True) as wlist:

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>目标测算工作台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="shell">
+  <!-- 左侧栏：品牌 + 视图列表 + 边界声明 -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">测</div>
+      <div>
+        <div class="brand-name">目标测算</div>
+        <div class="brand-sub">线上 · 人货场三视角</div>
+      </div>
+    </div>
+    <nav class="nav" id="nav">
+      <div class="nav-group-label">视图</div>
+      <!-- 平台列表由 app.js 注入 -->
+    </nav>
+    <div class="sidebar-foot">
+      <button id="reload" class="btn ghost sm" type="button">重新载入数据</button>
+      <div class="boundary">本机运行 · 数据不出机器</div>
+    </div>
+  </aside>
+
+  <!-- 中央工作区 -->
+  <main class="main">
+    <header class="stagebar">
+      <div class="seg" id="scenario-seg" role="tablist" aria-label="情景选择">
+        <button type="button" data-s="保守">保守</button>
+        <button type="button" data-s="基准" class="active">基准</button>
+        <button type="button" data-s="挑战">挑战</button>
+      </div>
+      <div class="stagebar-title" id="view-title">全渠道 · 基准</div>
+      <div class="stagebar-meta" id="range-meta"></div>
+    </header>
+
+    <div class="content">
+      <div class="view-intro">调右侧情景参数实时重算；三视角互为校验，差异 &gt;5% 会在此处与交叉校验卡中提示。</div>
+
+      <div id="check-banner"></div>
+
+      <section class="kpis" id="kpis"></section>
+
+      <section class="card">
+        <div class="card-h">
+          <div class="card-title">月度目标 GMV（新客 / 老客拆分，人视角口径）</div>
+          <div class="legend">
+            <span class="legend-item"><i class="sw sw-new"></i>新客GMV</span>
+            <span class="legend-item"><i class="sw sw-old"></i>老客GMV</span>
+          </div>
+        </div>
+        <div id="chart" class="chart"></div>
+      </section>
+
+      <section class="grid-2">
+        <div class="card">
+          <div class="card-h"><div class="card-title">三视角交叉校验（年化）</div></div>
+          <div id="views-card" class="card-body"></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><div class="card-title">平台年度目标</div></div>
+          <div id="annual-card" class="card-body"></div>
+        </div>
+      </section>
+
+      <section class="card" id="goods-card">
+        <div class="card-h"><div class="card-title">商品结构 · 品类 × 梯队（基期结构 × 梯队增速）</div></div>
+        <div id="goods" class="card-body"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><div class="card-title">月度明细</div></div>
+        <div class="tbl-wrap"><table class="tbl" id="detail"></table></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- 右侧 Inspector：情景参数 / 口径说明 -->
+  <aside class="inspector">
+    <div class="insp-tabs" role="tablist">
+      <button type="button" class="active" data-pane="params-pane">情景参数</button>
+      <button type="button" data-pane="caliber-pane">口径说明</button>
+    </div>
+    <div class="insp-body">
+      <div id="params-pane"></div>
+      <div id="caliber-pane" hidden></div>
+    </div>
+  </aside>
+</div>
+
+<footer class="statusbar">
+  <span id="sb-mode" class="chip warn">演示数据</span>
+  <span id="sb-src" class="sb-item"></span>
+  <span class="sb-sep">·</span>
+  <span id="sb-time" class="sb-item meta"></span>
+  <span class="sb-right">本机运行 · 数据不出机器</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

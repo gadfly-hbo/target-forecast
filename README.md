@@ -22,11 +22,23 @@
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
+.venv/bin/python main.py serve      # 启动本地 HTML 工作台（http://127.0.0.1:8300）
 .venv/bin/python main.py demo       # 生成演示数据并跑通全流程（先看这个）
 .venv/bin/python main.py templates  # 生成两种输入模板到 templates/
 .venv/bin/python main.py run        # 用 data/ 下的正式数据测算
 .venv/bin/python -m pytest tests -q # 核心不变量测试
 ```
+
+## 本地工作台（main.py serve）
+
+浏览器打开 `http://127.0.0.1:8300`（`--port` 可换端口）。数据与测算全部在本机完成，`data/` 为空时自动生成演示数据。
+
+- **左栏**：全渠道 / 各平台视图切换（标注模式A/B）
+- **中央**：情景切换（保守/基准/挑战）、交叉校验横幅（任一视角与主口径差 >5% 会 ⚠）、KPI、月度 GMV 堆叠图（新客/老客）、三视角校验表、商品结构、月度明细
+- **右栏 Inspector**：当前情景的人/场/货三组增速参数，改动后防抖自动重算（调参 → 看数 → 校验的核心闭环）；「口径说明」页签常驻各条口径
+- **底部状态栏**：数据源、演示/正式标记、最近测算时间、本机运行声明
+
+后端为标准库 `http.server` + JSON API（`/api/state`、`/api/calc`），无新增依赖；前端无框架、无 CDN 依赖，离线可用。
 
 ## 两种数据模式
 
@@ -66,7 +78,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 target-forecast/
 ├── config.yaml                  # 口径 + 三档情景参数（改这里调目标）
-├── main.py                      # CLI：demo / run / templates
+├── main.py                      # CLI：serve / demo / run / templates
 ├── target_forecast/
 │   ├── schema.py                # 字段定义与统一指标层
 │   ├── ingest_detail.py         # 模式A：明细→月度指标 + 货结构
@@ -74,10 +86,12 @@ target-forecast/
 │   ├── engine.py                # 测算引擎：基线/季节性/三视角/情景
 │   ├── aggregate.py             # 全渠道汇总（加总 vs 重算）
 │   ├── report.py                # Excel 报表
+│   ├── server.py                # 本地工作台：静态页 + JSON API
+│   ├── static/                  # 工作台前端（index.html / style.css / app.js）
 │   ├── demo.py                  # 演示数据生成（含新品上架模拟）
 │   └── templates.py             # 输入模板生成
 ├── templates/                   # 两种填数模板
 ├── data/                        # orders/（模式A）、metrics/（模式B）
-├── tests/test_core.py           # 核心不变量测试
+├── tests/                       # test_core.py 核心不变量 + test_server.py 工作台冒烟
 └── output/                      # 报表与中间指标
 ```
