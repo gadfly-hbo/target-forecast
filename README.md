@@ -19,6 +19,10 @@
 
 ## 快速开始
 
+**双击 `启动目标测算.command` 即可**（Finder/终端均可，双端通用）：首次运行自动建虚拟环境装依赖，`data/` 为空自动生成演示数据，起本机服务后自动打开浏览器；默认端口 8300，被占用时自动换空闲端口（`PORT=xxxx` 可覆盖），Ctrl+C 退出。
+
+命令行方式：
+
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
