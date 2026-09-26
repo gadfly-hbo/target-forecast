@@ -95,3 +95,27 @@ target-forecast/
 ├── tests/                       # test_core.py 核心不变量 + test_server.py 工作台冒烟
 └── output/                      # 报表与中间指标
 ```
+
+---
+
+## 优惠券测算工具（coupon_tool/）
+
+独立的满减券情景测算与比较工具：判断“是否发券、满多少减多少、需要多大转化提升才回本、结论对哪些假设敏感”。与 `target_forecast` 互不依赖；金额口径为**本次券前可用商品金额**，全部指标出自同一分支账本，允许“不发券”成为结论。
+
+```bash
+.venv/bin/python -m coupon_tool demo      # 合成演示场景端到端（复现方案文档黄金表，产出三格式导出）
+.venv/bin/python -m coupon_tool serve     # 本地工作台 http://127.0.0.1:8310（四页签，离线）
+.venv/bin/python -m coupon_tool templates # 生成分桶/订单明细 XLSX 导入模板到 templates/
+.venv/bin/python -m coupon_tool console --scenario coupon-demo-001   # 测算已保存场景
+```
+
+核心库接口：`load_spec / validate_spec / simulate / compare / stress_test / create_review`。要点：
+
+- **四子模型**（命中与核销、凑单与流失、转化响应、统一账本）实现自《优惠券测算工具 v2.0 方案》§4，分支概率合计=1、贡献拆解与 ΔΠ 对平是引擎不变量。
+- **黄金案例**：第七节合成场景的 10 行基准表与压力表 6 值作为验收测试（容差 ±1 分）。
+- **决策层**：无券候选始终参与；预算为过滤约束（不截断成本）；输出四类结论而非强行推荐冠军。
+- **可追溯**：运行封存（输入快照+配置+引擎版本）不可变、可只读重放；导出 Markdown/CSV/JSON 三格式。
+- **复盘**：预测 vs 实际 + 偏差七类；参数新版本需人工确认，旧版本永不覆盖。
+- 演示参数为合成假设（synthetic_assumptions），非行业真值、非经营建议。
+
+测试：`.venv/bin/python -m pytest tests/test_coupon_*.py -q`（98 项，含 M01–M20 验收）。

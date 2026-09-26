@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>优惠券测算工作台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">券</span>优惠券测算 · 工作台</div>
+    <button id="btn-demo" class="btn primary block">加载演示场景</button>
+    <nav class="stages" id="nav">
+      <button class="stage current" data-view="data"><span class="dot">1</span>数据与基准</button>
+      <button class="stage" data-view="params"><span class="dot">2</span>场景与参数</button>
+      <button class="stage" data-view="compare"><span class="dot">3</span>比较与决策</button>
+      <button class="stage" data-view="history"><span class="dot">4</span>历史与复盘</button>
+    </nav>
+    <div class="side-note">先设置参数再给出结果<br>合成参数 ≠ 经营证据</div>
+  </aside>
+
+  <main class="main">
+    <header class="stagebar">
+      <span class="view-title" id="view-title">数据与基准</span>
+      <span class="hint" id="view-hint">导入基准分布、确认口径；或直接加载演示场景</span>
+      <span class="pill">引擎 <span id="engine-ver">—</span></span>
+    </header>
+
+    <!-- ① 数据与基准 -->
+    <section id="view-data" class="view">
+      <div class="card">
+        <div class="card-h">演示场景</div>
+        <p class="small">内置提案第七节合成场景（N=100,000、C₀=8%、五桶分布）。<b>参数为合成假设，非行业真值</b>。</p>
+        <button id="btn-demo2" class="btn primary">加载演示场景</button>
+      </div>
+      <div class="card">
+        <div class="card-h">导入基准分布（CSV 粘贴 / XLSX 模板）</div>
+        <div class="toolrow">
+          <label class="fld sm">格式
+            <select id="import-mode">
+              <option value="buckets">分桶表（bucket_min/max, avg_amount_cents, orders|weight, avg_margin_rate）</option>
+              <option value="orders">订单明细（order_id, amount_cents, margin_cents?, refunded?）</option>
+            </select>
+          </label>
+          <button id="btn-import" class="btn">导入检查</button>
+          <button id="btn-templates" class="btn ghost">生成 XLSX 模板</button>
+        </div>
+        <textarea id="import-csv" class="ta" rows="7" placeholder="粘贴 CSV（含表头），金额单位=分。&#10;示例：bucket_min_cents,bucket_max_cents,avg_amount_cents,orders,avg_margin_rate&#10;10000,14999,12000,350,0.30"></textarea>
+        <div id="import-issues"></div>
+        <div id="import-preview"></div>
+        <div class="toolrow">
+          <button id="btn-apply-baseline" class="btn primary" disabled>应用为当前场景基准</button>
+          <span class="small text3">应用后到「场景与参数」设置 N 与 C₀</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h">金额口径（必读）</div>
+        <ul class="small">
+          <li>金额 = <b>本次券前、按实际门槛规则的可用商品金额</b>（不是实付，不含运费）。</li>
+          <li>观察单位（用户/会话）与窗口必须在 N、C₀、实际结果中同口径；订单数不能直接当购买用户数。</li>
+          <li>缺 N 时结果降级为「每观察单位」口径，不输出活动总量。</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ② 场景与参数 -->
+    <section id="view-params" class="view hidden">
+      <div id="params-empty" class="empty">
+        <div class="empty-ico">⌘</div>
+        <div>尚未加载场景</div>
+        <button class="btn primary sm" onclick="document.getElementById('btn-demo').click()">加载演示场景</button>
+        <span class="small text3">或到「数据与基准」导入分布后新建</span>
+      </div>
+      <div id="params-body" class="hidden">
+        <div class="card">
+          <div class="card-h">基准</div>
+          <div class="toolrow">
+            <label class="fld sm">场景 ID<input id="p-sid" class="inp"></label>
+            <label class="fld sm">N（人群/会话总量）<input id="p-n" type="number" class="inp"></label>
+            <label class="fld sm">C₀（无券转化率）<input id="p-c0" type="number" step="0.0001" class="inp"></label>
+            <label class="fld sm">证据状态
+              <select id="p-evidence" class="inp">
+                <option value="synthetic_assumptions">合成假设</option>
+                <option value="business_input">业务输入</option>
+                <option value="historical_descriptive">历史描述估计</option>
+                <option value="observational_modeling">观察性建模</option>
+                <option value="experimental_support">对照/实验支持</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h">候选券（金额单位：元；无券候选自动包含）</div>
+          <table class="tbl" id="cand-table"><thead><tr>
+            <th>启用</th><th>门槛 T</th><th>面额 F</th><th>备注</th><th></th>
+          </tr></thead><tbody></tbody></table>
+          <button id="btn-cand-add" class="btn sm ghost">＋ 添加候选</button>
+        </div>
+        <div class="card">
+          <div class="card-h">成本口径 <span class="chip chip-accent" id="src-cost">来源：未标注</span></div>
+          <div class="toolrow">
+            <label class="fld sm">原篮子毛利率<input id="p-margin" type="number" step="0.01" class="inp"></label>
+            <label class="fld sm">加购毛利率<input id="p-margin-add" type="number" step="0.01" class="inp"></label>
+            <label class="fld sm">商家承担 ρ<input id="p-rho" type="number" step="0.05" class="inp"></label>
+            <label class="fld sm">每单履约费（分）<input id="p-fee" type="number" class="inp"></label>
+            <label class="fld sm">支付费率<input id="p-feerate" type="number" step="0.001" class="inp"></label>
+            <label class="fld sm">退货调整 H（分/单）<input id="p-return" type="number" class="inp"></label>
+            <label class="fld sm">新增固定费用 K（分）<input id="p-k" type="number" class="inp"></label>
+          </div>
+          <p class="small text3">毛利含履约时不要重复填履约费（会被拦截）。</p>
+        </div>
+        <div class="card">
+          <div class="card-h">行为参数 <span class="chip chip-accent" id="src-behavior">来源：未标注</span></div>
+          <div class="toolrow">
+            <label class="fld sm">触达 e<input id="p-e" type="number" step="0.05" class="inp"></label>
+            <label class="fld sm">新增触达 e⁺<input id="p-enew" type="number" step="0.05" class="inp"></label>
+            <label class="fld sm">自然核销 r<input id="p-r" type="number" step="0.05" class="inp"></label>
+            <label class="fld sm">加购核销 r⁺<input id="p-rp" type="number" step="0.05" class="inp"></label>
+            <label class="fld sm">流失 d<input id="p-d" type="number" step="0.01" class="inp"></label>
+          </div>
+          <div class="toolrow">
+            <label class="fld sm">凑单模式
+              <select id="p-qmode" class="inp"><option value="curve">演示曲线 q_cap·exp(−λg)·min(1,(F/T)/d_ref)</option><option value="table">参数表</option><option value="zero">无凑单</option></select>
+            </label>
+            <label class="fld sm">q_cap<input id="p-qcap" type="number" step="0.05" class="inp"></label>
+            <label class="fld sm">λ<input id="p-lam" type="number" step="0.1" class="inp"></label>
+            <label class="fld sm">d_ref<input id="p-dref" type="number" step="0.05" class="inp"></label>
+          </div>
+          <div class="toolrow">
+            <label class="fld sm">转化响应模式
+              <select id="p-conv" class="inp"><option value="relative">相对曲线 min(k·F/T, s_max)</option><option value="absolute">绝对 ΔC⁺</option></select>
+            </label>
+            <label class="fld sm">k<input id="p-kc" type="number" step="0.05" class="inp"></label>
+            <label class="fld sm">s_max<input id="p-smax" type="number" step="0.05" class="inp"></label>
+            <label class="fld sm">绝对 ΔC⁺<input id="p-dcp" type="number" step="0.0001" class="inp" placeholder="绝对模式时填"></label>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h">业务目标与约束</div>
+          <div class="toolrow">
+            <label class="fld sm">目标模式
+              <select id="p-objective" class="inp">
+                <option value="incremental_contribution">毛利优先（max ΔΠ）</option>
+                <option value="conversion">转化优先（max C，默认 ΔΠ≥0）</option>
+                <option value="balanced">均衡（帕累托 + 加权分）</option>
+              </select>
+            </label>
+            <label class="fld sm">商家券预算（元）<input id="p-budget" type="number" class="inp" placeholder="不设限"></label>
+            <label class="fld sm">增量贡献底线（元）<input id="p-floor" type="number" class="inp"></label>
+            <label class="fld sm checkbox"><input id="p-loss" type="checkbox"> 允许受控亏损</label>
+            <label class="fld sm">最大亏损（元）<input id="p-maxloss" type="number" class="inp" placeholder="受控亏损时填"></label>
+            <label class="fld sm">转化率下限<input id="p-mincvr" type="number" step="0.0001" class="inp" placeholder="不设限"></label>
+            <label class="fld sm">F/T 上限<input id="p-maxft" type="number" step="0.01" class="inp" placeholder="不设限"></label>
+          </div>
+        </div>
+        <div class="toolrow">
+          <button id="btn-save-scenario" class="btn primary">保存场景</button>
+          <button id="btn-goto-compare" class="btn">去比较 →</button>
+          <span id="params-validation" class="small"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ③ 比较与决策 -->
+    <section id="view-compare" class="view hidden">
+      <div id="compare-empty" class="empty">
+        <div class="empty-ico">…</div>
+        <div>先设置参数再给出结果</div>
+        <span class="small text3">加载或保存场景后，在此运行同口径比较</span>
+      </div>
+      <div id="compare-body" class="hidden">
+        <div class="toolrow">
+          <button id="btn-compare" class="btn primary">运行比较</button>
+          <span id="compare-conclusion"></span>
+        </div>
+        <div class="card">
+          <div class="card-h">候选结果表（同一账本；点击行看分解与账本）</div>
+          <div class="tbl-wrap"><table class="tbl" id="res-table"><thead><tr>
+            <th>券组合</th><th>证据状态</th><th>最终转化率</th><th>净转化变化 pp</th>
+            <th>原有人群流失</th><th>毛新增订单</th><th>自然核销量</th><th>加购核销量</th>
+            <th>商家补贴 元</th><th>总贡献 元</th><th>增量贡献 元</th><th>净增量 ROI</th><th>约束状态</th>
+          </tr></thead><tbody></tbody></table></div>
+          <p class="small text3" id="filtered-note"></p>
+        </div>
+        <div id="row-detail"></div>
+        <div class="card">
+          <div class="card-h">敏感性 / 压力情景（范围显式指定，不内置 ±20%）</div>
+          <div class="toolrow">
+            <label class="fld sm checkbox"><input type="checkbox" class="stress-var" data-variant="低响应" data-changes='{"behavior.conversion.k":0.45}'> 低响应 k=0.45</label>
+            <label class="fld sm checkbox"><input type="checkbox" class="stress-var" data-variant="高响应" data-changes='{"behavior.conversion.k":1.35}'> 高响应 k=1.35</label>
+            <label class="fld sm checkbox"><input type="checkbox" class="stress-var" data-variant="低凑单高流失" data-changes='{"behavior.q_curve.q_cap":0.4,"behavior.churn":0.05}'> 低凑单高流失</label>
+            <button id="btn-stress" class="btn">运行敏感性</button>
+          </div>
+          <div id="stress-out"></div>
+        </div>
+        <div class="card">
+          <div class="card-h">决策卡（人工确认；不要求与排序第一一致，但必须留理由）</div>
+          <div class="toolrow">
+            <label class="fld sm">选择
+              <select id="d-choice" class="inp"><option value="">— 选择 —</option></select>
+            </label>
+            <label class="fld sm">确认人<input id="d-by" class="inp"></label>
+          </div>
+          <label class="fld">确认依据 / 未采纳模型排序的原因
+            <textarea id="d-reason" class="ta" rows="3"></textarea>
+          </label>
+          <div class="toolrow">
+            <button id="btn-run" class="btn primary">封存运行并保存决策</button>
+            <span class="small text3">封存=输入快照+配置+引擎版本+结果；改输入产生新运行，不覆盖</span>
+          </div>
+          <div id="run-out"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ④ 历史与复盘 -->
+    <section id="view-history" class="view hidden">
+      <div class="card">
+        <div class="card-h">运行历史（不可变；重放可复核）</div>
+        <div id="runs-list" class="filelist"></div>
+      </div>
+      <div id="run-detail"></div>
+    </section>
+  </main>
+
+  <aside class="inspector">
+    <div class="insp-tabs">
+      <button class="tab current" data-tab="caliber">口径说明</button>
+      <button class="tab" data-tab="limits">限制与证据</button>
+    </div>
+    <div id="insp-caliber" class="insp-body small">
+      <p><b>四个子模型</b>：① 命中与核销（命中≠核销）② 凑单与流失（未凑单≠保留成交）③ 转化响应（毛新增，不重复乘命中率）④ 统一账本（一切指标同源）。</p>
+      <p><b>口径</b>：金额=本次券前可用商品金额（分）；无券候选=完整基准；预算=过滤约束，不截断成本。</p>
+      <p><b>四类结论</b>：可行 / 需小范围验证 / 建议不发券 / 无法形成有效比较——“推荐”只是当前假设下的条件性建议。</p>
+      <p><b>不做</b>：不自动发券、不做实验分流、不伪造置信区间、不把假设包装成预测。</p>
+    </div>
+    <div id="insp-limits" class="insp-body small hidden">
+      <div id="insp-limits-content">（尚无测算结果）</div>
+    </div>
+  </aside>
+</div>
+<footer class="statusbar">
+  <span id="st-dir">—</span>
+  <span id="st-scenario">未加载场景</span>
+  <span id="st-run">尚无运行</span>
+  <span class="st-boundary">本机运行 · 数据不出本机</span>
+</footer>
+<div id="toast" class="toast hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>

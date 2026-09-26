@@ -9,3 +9,7 @@ __pycache__/
 # output/ 由 main.py run 重新生成
 data/
 output/
+
+# 优惠券测算工具（coupon_tool）运行时数据与本地 flow 状态
+coupon_data/
+.flow/state.json
