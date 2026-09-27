@@ -1,5 +1,6 @@
 """P3 切片 2：assistant service 编排测试（Echo 回放后端 + FakeHttp 执行层）。"""
 
+import json
 import sys
 from pathlib import Path
 
@@ -138,6 +139,38 @@ def test_co_round_read_executes_before_write_staging():
     assert any(m == "POST" and p == "/t/roi/api/calc" for m, p, _ in http.calls)  # 只读先执行
     assert not any(p.endswith("assistant_params") for _, p, _ in http.calls)      # 写未执行
     assert "顺带完成只读查询" in res["reply"]
+
+
+def test_zcode_key_resolution_both_layouts(tmp_path, monkeypatch):
+    """key 解析：provider_config.json（mini 形态）与 v2/config.json provider 映射（macbook 形态）。"""
+    from workbench.assistant import runtime
+
+    zcode = tmp_path / ".zcode" / "v2"
+    zcode.mkdir(parents=True)
+    # 形态一：providerConfigRules（本机 mini）
+    (zcode / "provider_config.json").write_text(json.dumps({
+        "config": {"providerConfigRules": {"providerRules": [
+            {"providerName": "小米", "config": {"access": {"apiKey": "KEY-RULES"},
+                                               "api": {"baseUrl": "https://token-plan-cn.xiaomimimo.com/v1"}}},
+        ]}}}, ensure_ascii=False), encoding="utf-8")
+    found = runtime._key_from_provider_rules(zcode / "provider_config.json")
+    assert found == "KEY-RULES"
+
+    # 形态二：provider 映射（macbook，baseURL 匹配小米）
+    (zcode / "config.json").write_text(json.dumps({
+        "provider": {
+            "other": {"options": {"apiKey": "OTHER-KEY", "baseURL": "https://example.com"}},
+            "8b9198ba": {"options": {"apiKey": "KEY-MAP",
+                                     "baseURL": "https://token-plan-cn.xiaomimimo.com/v1"}},
+        }}, ensure_ascii=False), encoding="utf-8")
+    found2 = runtime._key_from_provider_map(zcode / "config.json")
+    assert found2 == "KEY-MAP"
+
+    # 端到端：monkeypatch 候选路径后 resolve_llm_config 走通（macbook 形态优先规则在前则先命中 rules）
+    monkeypatch.setattr(runtime, "ZCODE_CANDIDATE_CONFIGS", [zcode / "config.json"])
+    cfg = runtime.resolve_llm_config(tmp_path)
+    assert cfg == {"base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+                   "api_key": "KEY-MAP", "model": "mimo-v2.6-pro"}
 
 
 def test_roi_set_plan_net_none_guard():

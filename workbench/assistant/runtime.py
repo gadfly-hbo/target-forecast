@@ -17,10 +17,37 @@ from .backend import BackendUnavailable, EchoBackend, OpenAiCompatBackend, PiSid
 from .fixtures import FIXTURES
 from .service import AssistantService
 
-ZCODE_PROVIDER_CONFIG = Path.home() / ".zcode" / "v2" / "provider_config.json"
+ZCODE_CANDIDATE_CONFIGS = [
+    Path.home() / ".zcode" / "v2" / "provider_config.json",  # providerConfigRules 形态（mac mini）
+    Path.home() / ".zcode" / "v2" / "config.json",           # provider 映射形态（macbook）
+]
 MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 DEFAULT_MODEL = "mimo-v2.6-pro"
 SIDECAR_PORT = 8321
+
+
+def _key_from_provider_rules(path: Path) -> str | None:
+    """provider_config.json 形态：providerConfigRules.providerRules 中 providerName 含「米」。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        rules = data["config"]["providerConfigRules"]["providerRules"]
+        xiaomi = next(r for r in rules if "米" in r.get("providerName", ""))
+        return xiaomi["config"]["access"]["apiKey"] or None
+    except (KeyError, StopIteration, json.JSONDecodeError, OSError):
+        return None
+
+
+def _key_from_provider_map(path: Path) -> str | None:
+    """v2/config.json 形态：provider.<id>.options，按 baseURL 匹配小米 MIMO 端点。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for entry in (data.get("provider") or {}).values():
+            opts = entry.get("options") or {}
+            if "xiaomimimo" in str(opts.get("baseURL", "")) and opts.get("apiKey"):
+                return opts["apiKey"]
+    except (AttributeError, json.JSONDecodeError, OSError):
+        pass
+    return None
 
 
 def resolve_llm_config(root: Path) -> dict | None:
@@ -33,16 +60,12 @@ def resolve_llm_config(root: Path) -> dict | None:
                     "api_key": cfg["WORKBENCH_LLM_API_KEY"],
                     "model": cfg.get("WORKBENCH_LLM_MODEL", DEFAULT_MODEL)}
 
-    if ZCODE_PROVIDER_CONFIG.is_file():
-        try:
-            data = json.loads(ZCODE_PROVIDER_CONFIG.read_text(encoding="utf-8"))
-            rules = data["config"]["providerConfigRules"]["providerRules"]
-            xiaomi = next(r for r in rules if "米" in r.get("providerName", ""))
-            key = xiaomi["config"]["access"]["apiKey"]
-            if key:
-                return {"base_url": MIMO_BASE_URL, "api_key": key, "model": DEFAULT_MODEL}
-        except (KeyError, StopIteration, json.JSONDecodeError):
-            pass
+    for candidate in ZCODE_CANDIDATE_CONFIGS:
+        if not candidate.is_file():
+            continue
+        key = _key_from_provider_rules(candidate) or _key_from_provider_map(candidate)
+        if key:
+            return {"base_url": MIMO_BASE_URL, "api_key": key, "model": DEFAULT_MODEL}
 
     if os.environ.get("WORKBENCH_LLM_API_KEY"):
         return {"base_url": os.environ.get("WORKBENCH_LLM_BASE_URL", MIMO_BASE_URL),
