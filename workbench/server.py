@@ -30,7 +30,7 @@ def build_default_registry(root: Path) -> Registry:
     root 必须为仓库根绝对路径——插件上下文不允许依赖 cwd（红队 K2）。
     """
     reg = Registry()
-    for modname in ("coupon_tool.plugin", "target_forecast.plugin"):
+    for modname in ("coupon_tool.plugin", "target_forecast.plugin", "roi_tool.plugin"):
         try:
             mod = importlib.import_module(modname)
         except ImportError:
@@ -70,7 +70,8 @@ def make_handler(registry: Registry):
         def do_GET(self) -> None:
             if _TOOL_PREFIX.match(self.path):
                 self._route_tool("GET")
-            elif self.path in ("/", "/index.html"):
+            elif self.path.split("?")[0] in ("/", "/index.html"):
+                # 容忍 query string：旧启动脚本的 /?tool=xxx 深链自 P0 起就在这里 404（P2 e2e 暴露）
                 _send(self, 200, (SHELL_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
             elif self.path in ("/style.css", "/app.js"):
                 f = SHELL_DIR / self.path.lstrip("/")

@@ -274,6 +274,12 @@ def test_shell_page_has_nav_and_frame(base_url):
     assert 'href="style.css"' in text and 'src="app.js"' in text
 
 
+def test_shell_root_page_tolerates_query(base_url):
+    """深链 /?tool=xxx 必须 200——P0  shipped 的 bug（精确匹配 "/"），P2 e2e 暴露。"""
+    status, html = _get(base_url + "/?tool=roi")
+    assert status == 200 and "测算工作台" in html.decode()
+
+
 def test_shell_static_assets(base_url):
     status, css = _get(base_url + "/style.css")
     assert status == 200 and "#f7f6f3" in css.decode()  # Xanthil 底 token
@@ -299,10 +305,87 @@ def test_shell_statusbar_xanthil_tokens(base_url):
 
 
 def test_default_registry_builds_all_tools():
-    """默认注册表装配两个真实插件（启动脚本路径）。"""
+    """默认注册表装配全部插件（启动脚本路径）。
+
+    K3 授权：P2 前本断言精确等于两工具集合；第三工具接入后更新为
+    「forecast/coupon 必在、roi 在、总数≥3」的超集校验——本 flow 唯一
+    被允许修改的存量断言，其余断言冻结（.flow/prd.md D5）。
+    """
     from workbench import build_default_registry
 
     reg = build_default_registry(ROOT)
-    assert set(reg.ids()) == {"forecast", "coupon"}
+    ids = set(reg.ids())
+    assert {"forecast", "coupon"} <= ids and "roi" in ids and len(ids) >= 3
     names = {t["name"] for t in reg.manifest()}
-    assert names == {"目标测算", "优惠券测算"}
+    assert {"目标测算", "优惠券测算"} <= names and "投放 ROI" in names
+
+
+# ---------- P2 切片 2：roi 插件壳内冒烟 ----------
+
+
+@pytest.fixture(scope="module")
+def roi_shell_url(tmp_path_factory):
+    from roi_tool import plugin as roi_plugin
+
+    reg = Registry()
+    reg.register(roi_plugin.build_tool(tmp_path_factory.mktemp("roi")))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(reg))
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+
+
+def test_roi_shell_pages(roi_shell_url):
+    status, html = _get(roi_shell_url + "/t/roi/")
+    assert status == 200 and "投放 ROI 测算" in html.decode()
+    status, css = _get(roi_shell_url + "/t/roi/style.css")
+    assert status == 200 and "#f7f6f3" in css.decode()
+    status, js = _get(roi_shell_url + "/t/roi/app.js")
+    assert status == 200 and 'api("api/calc"' in js.decode()  # 相对路径 calc 调用点（经 api() 帮助函数）
+
+
+def test_roi_shell_state(roi_shell_url):
+    status, body = _get(roi_shell_url + "/t/roi/api/state")
+    state = json.loads(body)
+    assert status == 200
+    assert state["engine_version"]
+    assert state["synthetic"] is True and state["demo_used"] is True
+    assert len(state["plans"]) == 4
+    assert set(state["scenarios"]) == {"保守", "基准", "挑战"}
+    # G4 契约：参数默认值由服务端下发（前端添加计划用），不硬编码在前端
+    assert set(state["param_defaults"]) == {"spend_cny", "cpc_cny", "cvr", "aov_cny",
+                                            "gross_margin", "refund_rate"}
+
+
+def test_roi_shell_calc_end_to_end(roi_shell_url):
+    _, state = _get(roi_shell_url + "/t/roi/api/state")
+    plans = json.loads(state)["plans"]
+    status, res = _post(roi_shell_url + "/t/roi/api/calc",
+                        {"plans": plans, "scenarios": {"基准": {"cvr_growth": 0.0, "aov_growth": 0.0}}})
+    assert status == 200
+    base = res["scenarios"]["基准"]
+    assert len(base["plans"]) == 4 and len(base["ranking"]) == 4
+    assert base["totals"]["spend"] > 0
+
+
+def test_roi_shell_calc_422(roi_shell_url):
+    status, res = _post(roi_shell_url + "/t/roi/api/calc",
+                        {"plans": [{"name": "坏计划", "spend_cny": 0, "cpc_cny": 1, "cvr": 0.05,
+                                    "aov_cny": 100, "gross_margin": 0.4, "refund_rate": 0.1}],
+                         "scenarios": {}})
+    assert status == 422 and "spend_cny" in res["error"]
+
+
+def test_roi_unknown_route_404(roi_shell_url):
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _get(roi_shell_url + "/t/roi/api/nope")
+    assert ei.value.code == 404
+
+
+def test_roi_static_no_root_absolute_api():
+    import re
+
+    for js in (ROOT / "roi_tool" / "static").glob("*.js"):
+        text = js.read_text(encoding="utf-8")
+        assert not re.search(r"""["']/api""", text), f"{js.name} 含根绝对 API 路径"

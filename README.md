@@ -47,7 +47,14 @@ workbench/                       底座：壳 server + 注册表 + 导航壳前�
 └── static/                      壳前端（侧边栏导航 + iframe 装载 + ?tool= 深链）
 target_forecast/plugin.py        目标测算插件适配（/t/forecast/）
 coupon_tool/plugin.py            优惠券测算插件适配（/t/coupon/）
+roi_tool/plugin.py               投放 ROI 测算插件适配（/t/roi/）
 ```
+
+**新增测算工具三步**（roi_tool 是范例）：① 写引擎包（纯函数，无 IO）+ `server.py`（route_get/route_post 模式，API 全相对路径）+ `static/` 前端；② 写 `plugin.py` 暴露 manifest（id/name/icon/handle_get/handle_post，可选 seed_demo/actions）；③ 在 `workbench/server.py` 的 `build_default_registry` 登记一行。壳的导航、状态栏、深链、前缀分发自动生效，底座其余代码零改动。
+
+### 投放 ROI 测算（roi_tool/）
+
+多投放计划的盈亏测算：单计划按「点击=消耗÷CPC → 订单=点击×CVR → GMV=订单×客单 → 净贡献=GMV×(1−退款)×毛利率−消耗」核算，输出 ROI、保本转化率与净贡献结论（「净亏损」允许成为结论）；保守/基准/挑战三档情景对转化率与客单施加增速，检验结论对假设的敏感度；多计划并排比较、按净贡献排名。**演示计划为合成假设，非行业真值、非经营建议。**
 
 各工具的独立入口（`main.py serve`、`python -m coupon_tool serve`）保留可用，前端 API 全部相对路径，独立运行与壳内运行行为一致。manifest 预留 `actions` 字段（机器可读能力声明），为未来 LLM 驱动（pi agent sdk）接入预留接口。
 

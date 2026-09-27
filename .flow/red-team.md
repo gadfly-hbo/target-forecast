@@ -1,54 +1,50 @@
-# Red-Team: 测算工作台 P1 — 数据收编 workspace/ + 统一导出 + 状态栏与设计语言
+# Red-Team: 测算工作台 P2 — 投放 ROI 工具验证插件协议（底座零改动）
 
 ## Top Kill-Assumptions (ranked)
 
-### K1 —「无损迁移」在两台机器上都可安全自动执行
-- **Claim:** data/ 与 coupon_data/ 的存量内容可以自动搬到 workspace/{forecast,coupon}/，用户无感、不丢数据。
-- **Steelman:** 路径面已枚举且极小（main.py / demo.py / templates.py / 两 server.py / 两 plugin.py / storage.py / exports.py / 启动脚本 / .gitignore）；移动文件本身可逆（先复制后删旧），冲突可检测。
-- **Fails if:** 两台机器（macmini/MacBook）各自数据有差异（真实业务数据两端各自维护——P0 launcher 注释明确「data/ 数据不入库，两端各自维护」），迁移脚本在两端行为不一致，或一端数据被另一端模式覆盖；或用户在迁移中途打开了正在运行的服务，读到一半的旧路径。
-- **Evidence（已取）:** 本机 data/（orders/、metrics/）与 coupon_data/（scenarios/runs/decisions/reviews/profiles）均有真实内容；output/ 有生成的报告与中间指标。.gitignore 忽略 data/、output/、coupon_data/——git 里没有任何数据，迁移不能靠版本控制回滚。
-- **Kill criterion:** 迁移逻辑出现「复制后删除源」且无法 dry-run / 无法冲突提示 → 停止，改为显式迁移脚本 + 人工确认。
-- **Cheapest test:** 迁移函数写成纯函数（给定源/目标目录返回操作计划），先用 tmp 目录单测，再对真实目录执行。
+### K1 —「不改底座一行代码」与壳的既有行为自动兼容
+- **Claim:** roi 工具只需引擎包 + plugin.py + static 前端 + 注册表一行，壳的导航/状态栏/深链/分发自动生效。
+- **Steelman:** 协议字段（id/name/icon/handle_get/handle_post/seed_demo/actions）在 P0 设计、P1 状态栏（壳 fetch 工具 /api/state 的 demo_used）都是按「任意第三工具」语义实现的；demo_used 在 roi 的 /api/state 里给出即可自动显示演示标记。
+- **Fails if:** roi 的某个合理需求落在协议外——如需要壳在导航分组、需要 query 之外的路径语义、需要 seed_demo 之外的启动钩子、或 iframe 内需要壳传参。任一出现即「协议漏需求」，P2 必须停下来补协议（这正是 P2 的目的，但补协议必须作为显式决策记录，不能悄悄改）。
+- **Evidence（已取）:** workbench/registry.py 协议字段固定；workbench/server.py 分发纯前缀匹配、无工具类型特判；壳 app.js 对工具清单完全通用（P0 审查已确认）。
+- **Kill criterion:** 实现中出现「workbench/ 必须改行为才能用」的时刻 → 停下，评估是协议缺口（补协议+记录）还是 roi 需求越界（砍需求）。
+- **Cheapest test:** 切片 1 先写「底座零改动」守护测试：diff 检查 workbench/ 与两现有工具在 P2 全程不变（git diff --stat 基线对比）。
 
-### K2 — 收编后「引擎不动、存量测试零断言修改」仍成立
-- **Claim:** 数据目录改到 workspace/ 后，113 项测试仍然全绿、断言零修改。
-- **Steelman:** 测试的数据目录全部参数化（test_coupon_server.py 用 tmp_path_factory；test_server.py 用 WorkbenchState(ROOT) 但 data/ 收编后 ROOT 下无 data——这是真实断点）；引擎读的是构造参数，不是硬编码路径。
-- **Fails if:** target_forecast 的 demo 生成、模板生成、report 输出路径与 data/ 收编纠缠（demo.generate(ROOT) 写 data/orders，report 写 output/），一处漏改导致 demo 数据写到旧位置被「空目录自动生成演示数据」逻辑反复触发。
-- **Evidence（已取）:** test_server.py 的 fixture 直接 `server.WorkbenchState(ROOT, ...)`，其 load() 在 root/data 为空时自动生成演示数据到 root/data——收编后 ROOT/data 不存在，必须在 fixture 或 WorkbenchState 参数上调整（属于测试设施改动，非断言改动，PRD 需明示允许）。
-- **Kill criterion:** 任何业务断言需要修改才能过 → 迁移破坏了行为，回退该改动。
-- **Cheapest test:** 收编切片完成后立即全量 pytest（4-7 秒，成本极低）。
+### K2 — ROI 模型简单到可用，而不是简单到被弃用
+- **Claim:** 推荐基线（点击=消耗÷CPC，GMV=点击×CVR×客单，净毛利=GMV×(1−退款)×毛利率−消耗）是用户要的测算。
+- **Steelman:** 线上零售投放核算的行业标准链路就是消耗→点击→订单→GMV→毛利；盈亏平衡 CVR 直接回答「这条计划值不值得投」；与 coupon 工具「允许不投成为结论」的哲学一致。
+- **Fails if:** 用户实际想要的是更复杂的模型（复购 LTV、自然流量蚕食/增量归因、多触点）——MVP 交付后被认为玩具。
+- **Kill criterion:** 用户在 PRD diff 门否定模型基线 → 先定模型再动工，这是本流程的第一个门。
+- **Cheapest test:** PRD diff 门本身就是这个测试——用户在动工前看到完整公式。
 
-### K3 — 统一导出通道有真实第二用户（forecast 的报表下载）
-- **Claim:** 统一导出约定值得建：forecast 的 Excel/CSV 产出现在无下载通道，P1 补上后用户会在工作台里下载。
-- **Steelman:** 现状 output/目标测算报告.xlsx 只能去 Finder 找；工作台内直接下载是明显体验增益；coupon 已有成熟导出模式可参照。
-- **Fails if:** forecast 的报表生成只在 CLI run 路径（main.py run），serve 路径从不生成文件——为下载通道要在 serve 路径新增「生成报表」能力，这超出「统一导出」变成「新增功能」，违背不过度设计。
-- **Evidence（已取）:** report.py 由 main.py run 调用；server.py serve 路径只有 /api/calc JSON，从不写 Excel。即 forecast 当前在壳内根本没有可下载的产物。
-- **Kill criterion:** 统一导出需要为 forecast 新增报表生成逻辑 → 收缩范围：P1 只统一 coupon 现有导出 + forecast 已有磁盘产物（若有）的下载，forecast serve 内生成报表推到 P2 之后单独评估。
-- **Cheapest test:** PRD 阶段逐条列出「导出通道服务的产物清单」，凡清单外的一律不做。
+### K3 —「底座零改动」与存量测试的硬冲突（已确证）
+- **Claim:** P2 后存量测试仍全绿。
+- **Steelman:** 引擎/协议/现有工具不动，绝大多数测试不受影响。
+- **Fails if:** `tests/test_workbench.py::test_default_registry_builds_all_tools` 断言 `set(reg.ids()) == {"forecast", "coupon"}` 且名称集合相等——注册 roi 后**必然失败**。这不是回归，是产品正确性变化（工具变多），但按 P1 的「断言零修改」先例会被误判为破坏。
+- **Evidence（已取）:** tests/test_workbench.py 中该测试精确断言两工具集合；shell 页导航/其他测试用包含式或动态断言不受影响。
+- **Kill criterion:** 无——此冲突不可避免，必须在 PRD diff 门显式披露并获得确认：允许把该断言更新为「包含 forecast/coupon 且总数≥2」式的超集校验（唯一被允许的存量断言修改）。
+- **Cheapest test:** 切片 1 先改这一处断言并跑全绿，其余断言冻结。
 
-### K4 — 状态栏需要壳级聚合而非展示位
-- **Claim:** 统一状态栏要做跨工具状态聚合（数据源、演示/正式、最近测算时间）。
-- **Steelman:** 壳 /api/state 已有工具清单；各工具 /api/state 已含 demo_used/coupon scenarios——聚合成本低。
-- **Fails if:** 「最近测算时间」等状态需要插件协议新增接口（actions 之外再加 status 上报），而各工具状态语义不同（forecast 的 calc 在内存、coupon 的 run 落盘），聚合层要为两个工具各写适配——底座再次长出工具特定代码，违背 K5/G7 教训。
-- **Kill criterion:** 状态栏信息无法从工具现有 /api/state 响应直接得到 → 该信息不进 P1 状态栏。
-- **Cheapest test:** 列出状态栏字段清单，逐字段标注来源端点已存在/需新增。
+### K4 — 演示数据的合成标注惯例被遵守
+- **Claim:** roi 演示计划集标注为合成假设。
+- **Fails if:** 演示数被当成行业真值引用。coupon 已有 synthetic 标注惯例（README 与界面），roi 必须同等标注。
+- **Cheapest test:** 静态断言演示响应带 synthetic 标记 + UI 常驻标注。
 
-### K5 — 设计语言精修范围可控
-- **Claim:** 壳 UI 对全局 DESIGN.md「完整对齐」是小改动。
-- **Steelman:** P0 壳已用 Xanthil token（底色/侧栏/圆角），diff 应集中在状态栏与细节密度。
-- **Fails if:** 「完整对齐」被解释为逐 token 审计 + 全套组件（命令面板/Inspector/语义色对），P1 范围爆炸。
-- **Kill criterion:** 设计语言切片出现与「侧栏 + 状态栏 + 内容区」无关的组件工作 → 砍。
-- **Cheapest test:** 设计切片只列 P1 新增/修改的具体 token 与组件清单。
+### K5 — 第三工具的工程量在 MVP 边界内不失控
+- **Claim:** 引擎（纯函数）+ 单页前端 + plugin + 测试，一次 flow 内完成。
+- **Fails if:** 前端仿 forecast 仪表盘全套（图表/Inspector/多视图）被搬过来——那超出 MVP。
+- **Kill criterion:** 前端切片出现图表库/多视图架构 → 砍到「计划表 + 情景切换 + 参数侧栏 + 结果表」。
+- **Cheapest test:** 切片拆解时前端范围写成显式清单。
 
 ## What's Well-Reasoned
 
-- 数据收编方向正确：workspace/{tool_id}/ 消除顶层 data/ 与 coupon_data/ 的散落，与 P0 插件协议的 root 约定自然衔接（plugin 构造时已有 root 参数）。
-- 迁移路径面极小且已枚举，K1/K2 的成本边界清晰，风险主要在「自动迁移的行为定义」而非「改哪里」。
-- 不动引擎、不动口径的边界继承自 P0，继续有效。
+- P2 把「协议验证」作为验收本质是对的：底座零改动不是洁癖，是迫使协议缺陷暴露的手段；K1 的 kill criterion 已把「补协议」路径显式化。
+- 模型基线用行业 standard 链路，且 MVP 明确排除 LTV/增量归因——避免在验证协议的工具里埋产品深水区。
+- K3 冲突在 ASSESS 阶段就被 grep 确证而非实现期爆雷，diff 门披露即可。
 
 ## What I Couldn't Assess
 
-- MacBook 端 data/ 与 coupon_data/ 的实际内容（只能本机验证迁移；需靠 fail-closed 迁移逻辑 + 双端各自执行保证安全）。
-- 用户对 forecast serve 内生成报表的真实需求强度（K3 的方向选择影响范围，留给 GRILL 推荐）。
+- 用户对 ROI 模型基线的真实期望（K2，只能靠 diff 门）。
+- roi 工具未来是否要接真实消耗数据（影响是否预留导入接口）——MVP 不做，P3/后续再定。
 
-**Verdict: GO** — 无已满足 kill criterion 的假设；K1-K5 均给出可执行的 kill criterion 与最便宜测试，PRD 可直接吸收。
+**Verdict: GO** — K3 是唯一已确证的冲突且解法明确（披露+一处断言更新授权），K1/K2 各有显式门（K2=diff 门，K1=守护测试）。

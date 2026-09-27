@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投放 ROI 测算</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>投放 ROI 测算</h1>
+  <div id="scenarios" class="seg" role="tablist" aria-label="情景切换"></div>
+  <span class="chip warn" title="演示参数为合成假设，非行业真值、非经营建议">合成假设</span>
+</header>
+
+<main class="layout">
+  <section class="workspace">
+    <table class="result-table">
+      <thead>
+        <tr>
+          <th>计划</th><th>消耗</th><th>点击</th><th>订单</th><th>GMV</th>
+          <th>ROI</th><th>净贡献</th><th>保本CVR</th><th>缺口</th><th>结论</th>
+        </tr>
+      </thead>
+      <tbody id="result-body"></tbody>
+      <tfoot id="result-foot"></tfoot>
+    </table>
+    <p id="stability" class="meta"></p>
+  </section>
+
+  <aside class="inspector">
+    <div class="insp-title">计划参数 <button type="button" id="add-plan" class="btn ghost sm">＋添加计划</button></div>
+    <div id="plan-forms"></div>
+    <div class="insp-title">情景增速</div>
+    <div id="scenario-forms"></div>
+    <p class="meta">链路：点击=消耗÷CPC → 订单=点击×CVR → GMV=订单×客单 → 净贡献=GMV×(1−退款)×毛利率−消耗。保本 CVR=CPC÷(客单×(1−退款)×毛利率)。</p>
+  </aside>
+</main>
+
+<footer class="statusbar">
+  <span id="sb-version" class="sb-item"></span>
+  <span class="sb-sep">·</span>
+  <span id="sb-total" class="sb-item"></span>
+  <span class="sb-spacer"></span>
+  <span class="sb-item sb-meta">本机运行 · 数据不出机器 · 合成演示，非经营建议</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

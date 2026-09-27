@@ -1,43 +1,26 @@
-# Review Findings — 测算工作台整合 P1（REVIEW round 1）
+# Review Findings — 测算工作台 P2（REVIEW round 1）
 
-Fresh-context code-reviewer verdict: **FAIL**（VERIFY 证据独立复跑一致：125 passed；迁移逻辑无覆盖/丢数据路径）。1 BLOCKER + 5 SUGGESTION。
+Fresh-context reviewer verdict: **FAIL（spec 轴）/ PASS（code 轴）**；VERIFY 证据复跑一致（144 passed）；底座接触确认为「注册表一行 + 缺陷修复（含其注释）」，K1 守住。
 
-## BLOCKER（round 1 修复周期处理）
+## BLOCKER（本周期修复）
 
-1. **forecast 导出端点无工作台 UI 入口，User Story 5 只交付了一半** — spec/implementation。`target_forecast/static/` 零改动，前端没有任何链接指向 `/api/export/report` 与 `/api/export/metrics/{platform}`；PRD US5「在工作台里直接下载」与 GRILL G5「前端生成链接时 encodeURIComponent」均预设前端入口存在。修复：forecast 工具页加报表 + 各平台 CSV 下载链接（encodeURIComponent），补静态断言测试。
+1. **演示计划集不满足 GRILL G1，且 demo.py 注释与实算相反** — 计划③京东快车 G1 要求「基准边界」，实算 base net=+9088.89；计划④小红书聚光 G1 要求「基准亏、挑战转正」，实算 base net=+8287.5 三档全正。注释「基准情景贴边」「基准亏、挑战转正」为不实陈述；测试只验合法性未守护 G1 行为意图。修复：重调 ③④ 参数使叙述成立 + 测试断言叙述 + 注释与实算一致。
 
-## SUGGESTION（CONVERGE 分类后处置见下）
+## SUGGESTION（本周期顺手修复——均为 PRD 明文条目或正确性小缺）
 
-2. **[coupon_tool/cli.py:40,45] `--out` 默认仍为 `output/coupon`** — 与 D3 收编精神不一致，`python -m coupon_tool demo` 会把产物写回旧布局。→ 分类为 blocking（D3 实现不完整），本轮修复。
-3. **[README.md:71] 表格行 4 格渲染断裂 + 残留旧路径** — 本轮修复（self-introduced defect）。
-4. **[target_forecast/server.py:210-211] `%2F` 绕过斜杠过滤的路径穿越** — decode 后未校验 `/` 与 `..`。本机低风险，但属 correctness bug。→ 分类为 blocking，本轮修复。
-5. **[启动*.command] `set -e` 下 migrate 崩溃导致整个启动脚本中止** — G4 fail-open 意图未覆盖迁移进程异常。→ 分类为 blocking（启动可靠性），本轮修复。
-6. **[workbench/migrate.py:62] dst 为目录时 `read_bytes()` 抛 IsADirectoryError 中止整个迁移** — 数据迁移代码的健壮性。→ 分类为 blocking，本轮修复。
+2. 引擎缺「跨情景结论稳定性」输出（PRD D2 明示）→ 补 stability 映射 + 前端翻转标记。
+3. G4 契约缺「参数默认值」字段 → state_payload 补 param_defaults，前端添加计划改用之。
+4. 删除全部计划后结果表残留旧数据且无提示（正确性小缺）→ 修。
+5. test_roi_shell_pages 的 "recalc" in js 为字符串存在断言 → 换 fetch("api/calc 调用点检查。
 
-## 待确认（记录，不处理）
+## 待确认（记录）
 
-- `test_forecast_export_report` 依赖真实仓库 `workspace/forecast/output/目标测算报告.xlsx` 存在（用户删除后该测试 404 失败）——接受此耦合：本机工具的 e2e 性质，报表由 `main.py run` 重新生成。
-- `workspace/coupon/` 暂无 `output/` 子目录——迁移前 `output/coupon` 本就不存在，导出时由 export_all 建目录，无问题。
-- 三脚本未实际执行（bash -n + 逻辑推演通过），浏览器级 e2e 未做。
+- 缺陷修复行的注释是否占用「底座一行」配额：按「修复+注释=一个缺陷修复」认定合规。
 
-## REVIEW round 2（2026-09-27）
+## REVIEW round 2（2026-09-27）— PASS
 
-Fresh-context reviewer verdict: **FAIL** — round-1 六项修复中五项属实，但 #1 为假证据：导出 pane 的 tab 切换漏接（app.js 只切换 params/caliber 两个 pane），exports-pane 永不显示；原静态测试只断言字符串存在，无法捕获。
-
-**Round-2 修复（本周期完成）：**
-- app.js tab 处理器补 `$("#exports-pane").hidden = ...` 一行（真修复）
-- 静态测试升级为对应性校验：index.html 每个 `data-pane` 值必须在 app.js 切换逻辑中出现
-- SUGGESTION 顺手修：reload toast 旧路径文案「data/」→「workspace/forecast/」；导出 metrics 正则容忍 query string（`([^/?]+)(\?.*)?`）
-- 记录不处理：migrate 对悬空符号链接的边界（行为安全、未测）；浏览器级 e2e 未做（静态已确证）
-
-VERIFY 复跑：128 passed, exit 0。
-
-## REVIEW round 3（2026-09-27）— PASS
-
-Fresh-context reviewer verdict: **PASS**，无阻断项。Round-1 六项 + Round-2 tab 切换修复全部属实有效；spec 轴（US1-10、D1-D7、G1-G8）逐条覆盖。
+Fresh-context reviewer verdict: **PASS**，无阻断。Round-1 blocker 为真修复（实算 ③ base −53.33 贴边、④ base −1027.5/挑战 +5120.4，注释与实算一致）；四项 SUGGESTION 全部落地可验证；底座接触面独立复核 = 恰好注册表一行 + 缺陷修复（含注释）；K3 断言冻结守住。
 
 **遗留 SUGGESTION（记录，不阻断）：**
-1. `test_forecast_export_ui_entry` 的对应性校验仍是字符串存在断言——删掉 app.js 切换行的回归不会被捕获。建议改为捕获组集合比对（`hidden = btn.dataset.pane !== "([^"]+)"` 的集合 == data-pane 集合）。防 round-1/2 假证据模式复发。
-2. 中间指标链接缺文件时浏览器原地展示 JSON 404（可选 UX 加固：fetch + toast）。
-
-VERIFY 复跑：128 passed, exit 0。
+1. 畸形请求体容器类型（scenarios 非 dict 等）触发 AttributeError → 连接重置而非 422；与 coupon 服务端既定模式同款，前端无路径产生此类请求体。修复方向：catch 元组加 AttributeError。
+2. 重名计划的 stability/ranking 以名为键会互相覆盖（G6 允许改出重名）；cosmetic 边界。

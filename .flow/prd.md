@@ -1,115 +1,107 @@
-# PRD — 测算工作台整合 P1：数据收编 + 统一导出 + 状态栏与设计语言
+# PRD — 测算工作台整合 P2：投放 ROI 测算工具（插件协议验证）
 
-规格源优先级：`.flow/proposal.md`（P1）> P0 规划继承项 > 本 PRD > 实现建议。红队：`.flow/red-team.md`（GO，K1-K5）。
+规格源优先级：`.flow/proposal.md`（P2）> P0/P1 继承约束 > 本 PRD > 实现建议。红队：`.flow/red-team.md`（GO，K1-K5；K3 已确证）。
 
 ## Problem Statement
 
-P0 后两个测算工具共享壳服务，但数据仍散落在仓库顶层：`data/`（目标测算输入）、`coupon_data/`（优惠券存储）、`output/`（两工具产出混放）。三个问题：① 顶层目录随工具增多会继续膨胀，与「一套底座」目标不符；② 优惠券有工作台内导出下载，目标测算的 Excel 报表只能去 Finder 找，两工具导出体验不统一；③ 壳缺底部状态栏，跨工具通用信息（本机运行、版本、当前工具）没有落位，设计语言只做了 P0 初版。
+工作台的插件协议（P0 设计、P1 加固）从未被第三个真实工具验证过。「新增测算工具不改底座一行代码」目前只是断言。需要一个真实业务工具——投放 ROI 测算——走通「引擎包 + plugin.py + static 前端 + 注册」全路径，暴露协议缺口（如有），并给用户一个可用的投放决策工具。
 
 ## Solution
 
-建立 `workspace/{tool_id}/` 数据布局并无损收编存量数据；两工具导出下载统一到 `/t/{id}/api/export/...` 约定（目标测算只下载已存在的磁盘产物，不在 serve 路径新增报表生成）；壳加底部状态栏并按全局 Xanthil 设计基线精修。
+新增 `roi_tool/` 包：纯函数测算引擎 + plugin.py 适配 + 单页前端，在 `workbench/server.py` 注册表登记（唯一允许的底座接触点）。工具回答：「每个投放计划预期赚不赚钱、ROI 多少、转化率至少要多少才保本、三档情景下结论稳不稳」。演示计划集内置合成数据（明确标注合成假设），无持久化、无导出端点、无数据导入。
 
 ## User Stories
 
-1. 作为使用者，我想所有测算工具的数据都在 `workspace/{tool_id}/` 下，以便顶层目录干净、备份/迁移清晰。
-2. 作为使用者，我想双击启动脚本后存量数据自动无损迁移到新布局，以便无感升级、不丢历史场景与报表。
-3. 作为使用者，我想迁移遇到冲突（新旧位置都有文件）时绝不被覆盖，以便本地数据安全。
-4. 作为维护者，我想迁移逻辑是可单测的纯函数（计划→执行分离），以便先在临时目录验证再碰真实数据。
-5. 作为使用者，我想在工作台里直接下载目标测算的 Excel 报表与中间指标 CSV，以便不用去 Finder 翻 output/ 目录。
-6. 作为使用者，我想两工具的下载入口形态一致（都在 `/t/{id}/api/export/...`），以便用法可迁移到未来的 ROI 工具。
-7. 作为使用者，我想壳底部状态栏看到当前工具、本机运行声明与版本，以便确认环境与数据边界。
-8. 作为使用者，我想数据源为演示数据时有明确标记，以便不会把演示数当正式数（forecast 的 demo_used 状态在壳层可见）。
-9. 作为维护者，我想数据目录改动后 113 项存量测试零断言修改保持绿色，以便确认行为无回归。
-10. 作为维护者，我想 `workspace/` 不入 git、旧 data/ coupon_data/ output/ 条目从 .gitignore 移除后由迁移保证干净，以便仓库卫生。
+1. 作为投放决策者，我想输入每个计划的消耗/CPC/转化率/客单/毛利率/退款率，看到预期 ROI 与净贡献，以便判断计划值不值得投。
+2. 作为投放决策者，我想看到每个计划的盈亏平衡转化率，以便知道保底要求。
+3. 作为投放决策者，我想切换保守/基准/挑战三档情景，以便检验结论对假设的敏感度。
+4. 作为投放决策者，我想多计划并排比较并按净贡献排序，以便分配预算。
+5. 作为投放决策者，我想「不值得投」成为明确结论而非被算法回避，以便止损。
+6. 作为工作台使用者，我想壳导航自动出现「投放 ROI」并可深链 `?tool=roi`，以便与现有工具一致的进入方式。
+7. 作为工作台使用者，我想演示数据有明确的合成假设标注，以便不误用。
+8. 作为维护者，我想 P2 全程 `workbench/`、`target_forecast/`、`coupon_tool/` 零改动（K1 守护），以便验证插件协议完备。
+9. 作为维护者，我想存量测试中唯一被修改的断言是两工具集合断言（K3 授权），其余全部冻结，以便确认无回归。
+10. 作为维护者，我想 README 记录第三个工具的接入方式，以便未来第四个工具照做。
 
 ## Implementation Decisions
 
-### D1 — 目标布局
+### D1 — 工具身份
+
+- 包名 `roi_tool/`，tool_id `roi`，名称「投放 ROI」，icon 「📈」。注册进 `build_default_registry`。
+
+### D2 — 引擎模型（基线，公式自解释）
+
+每计划输入：`spend_cny`（消耗元）、`cpc_cny`（单次点击成本）、`cvr`（转化率 0-1）、`aov_cny`（客单价）、`gross_margin`（毛利率 0-1）、`refund_rate`（退款率 0-1）。
 
 ```
-workspace/
-├── forecast/            # 目标测算（tool_id=forecast）
-│   ├── orders/          # 模式A 订单明细（原 data/orders）
-│   ├── metrics/         # 模式B 聚合指标（原 data/metrics）
-│   └── output/          # 报表 + 中间指标（原 output/，含 目标测算报告.xlsx、中间指标/）
-└── coupon/              # 优惠券测算（tool_id=coupon）
-    ├── scenarios/ runs/ decisions/ reviews/ profiles/   # 原 coupon_data/* 原样收编
-    └── output/          # 三格式导出（原 output/coupon/）
-templates/               # 两工具共用，原位不动
-config.yaml              # 留仓库根（全局口径与情景参数）
+点击 clicks   = spend / cpc
+订单 orders   = clicks × cvr
+GMV           = orders × aov
+净毛利 net    = GMV × (1 − refund_rate) × gross_margin − spend
+ROI           = GMV / spend
+盈亏平衡 CVR* = spend ÷ (spend/cpc × aov × (1−refund) × margin)
+              = cpc × spend... 化简：CVR* = cpc / (aov × (1−refund_rate) × gross_margin)
 ```
 
-### D2 — 迁移机制（新增细节，吸收红队 K1）
+- 情景（保守/基准/挑战）：对 `cvr` 与 `aov` 施加增速，其余参数平推；增速可配（默认 -20% / 0% / +20%）。
+- 输出（每计划×情景）：clicks/orders/GMV/net/ROI/CVR*/结论（net>0 投 / 边界 / 不投）。
+- 汇总：情景内合计 spend/GMV/net 与按 net 降序排名；跨情景结论稳定性（某计划在三档下结论是否一致）。
+- 参数校验：spend>0、cpc>0、0<cvr<1、aov>0、0≤margin<1、0≤refund<1；不合法 → 422 带原因（coupon 模式）。
+- 引擎为纯函数：`evaluate(plans, scenarios) -> result`，无 IO。
 
-- `workbench/migrate.py`：`plan(root) -> 操作计划`（纯函数，可单测：列出 move 操作与冲突清单）+ `apply(root) -> 报告`（执行计划：逐文件移动；**冲突文件跳过不覆盖**，报告列出）。
-- 冲突定义：目标路径已存在且与源不是同一文件。目标存在源不存在 → 视为已迁移，跳过。
-- 启动脚本（三个 .command）起服务前：若 `workspace/` 不存在且旧目录有数据 → 执行迁移并输出结果；已迁移 → 无操作。**服务进程本身不做隐式迁移**（fail-closed：HTTP 服务不悄悄改文件系统）。
+### D3 — 服务端与插件
 
-### D3 — 两工具路径改造（新增细节，吸收红队 K2）
+- `roi_tool/server.py`：route_get/route_post 模式（复用 coupon/forecast 的结构惯例，代码独立书写）；`GET /api/state` 返回引擎版本、演示计划（若未自定义）、参数默认值、情景定义、`demo_used: true` 标记、`synthetic` 标注；`POST /api/calc` 接收 plans+scenario 调整 → evaluate → JSON；不合法输入 422。
+- `roi_tool/plugin.py`：`build_tool(root)`，无持久化目录需求（不建 workspace/roi/，K5）；handle_get/handle_post 绑定。
+- 无导出端点（无磁盘产物，P1 D4 约定）；无 runs 封存。
 
-- forecast：`WorkbenchState` 扫描 `root/workspace/forecast/{orders,metrics}`；`demo.generate`、`templates.build`、report/main.py 的 OUT_DIR 指向 `workspace/forecast/output`；CLI 提示文案同步。空数据自动生成演示数据逻辑保留（写到新路径）。
-- coupon：`plugin.py` 构造 `workspace/coupon` 与 `workspace/coupon/output`；`server.serve()` 与 `storage.Store`、`exports.export_all` 的默认参数同步更新。
-- 存量测试设施允许调整指向（如 test_server.py fixture 的 root 语义不变，靠迁移后的 workspace 供数），**业务断言零修改**是硬门槛（红队 K2 kill criterion）。
+### D4 — 前端
 
-### D4 — 统一导出下载（新增细节，吸收红队 K3）
+单页（forecast 式，Xanthil token）：顶部情景切换（保守/基准/挑战）、主区计划结果表（spend/GMV/ROI/net/CVR*/结论 chip）、参数侧栏（每计划六参数可调，防抖重算）、演示标注常驻。无图表、无多视图（K5 守护）。API 全相对路径。
 
-- 约定：每工具导出下载统一挂 `/t/{id}/api/export/...`。coupon 现状已符合（`/t/coupon/api/export/{run_id}/{kind}`），仅需路径根变化（随 D3）。
-- forecast 新增 `GET /t/forecast/api/export/report`（下载 workspace/forecast/output/目标测算报告.xlsx）与 `GET /t/forecast/api/export/metrics/{platform}`（下载中间指标 CSV）。**只服务已存在的磁盘产物**，文件不存在 → 404 提示「先运行 main.py run 生成」。不在 serve 路径新增报表生成能力（K3 kill criterion）。
-- 壳不做导出聚合端点（红队 K4：无第二用户，不做当前工具不用的功能）。
+### D5 — 「底座零改动」守护（K1/K3）
 
-### D5 — 壳状态栏（新增细节，吸收红队 K4）
+- P2 全程 `workbench/`（除注册表登记一行）、`target_forecast/`、`coupon_tool/` 无行为改动；REVIEW 以 diff 复核。
+- 存量测试唯一允许修改：`test_default_registry_builds_all_tools` 的两条精确集合断言 → 更新为「forecast/coupon 必在且总数≥3、名称对应」（K3 授权，diff 门确认）。其余断言冻结。
 
-- 壳底部状态栏字段：产品名+版本、当前激活工具名、本机运行声明、数据源标记（仅当工具 /api/state 含 demo_used 时显示「演示数据」）。
-- 数据来源：壳前端直接 fetch 当前工具的 `/t/{id}/api/state`（同源，无需插件协议新增接口）。coupon 无 demo_used 字段则状态栏不显示数据源块。**不为状态栏扩展插件协议**（K4 kill criterion）。
+### D6 — README
 
-### D6 — 仓库卫生
-
-- `.gitignore`：移除 `data/`、`output/`、`coupon_data/` 三条，加 `workspace/`。
-- README：目录结构、数据放置说明（templates 文案同步指向 workspace）、迁移说明。
-
-### D7 — 设计语言（新增细节，吸收红队 K5）
-
-- 范围限定三处：底部状态栏（新，Xanthil token：surface-2 底、border-strong 顶线、meta 10.5px 字号、语义色对）、侧栏微调（激活态对齐 accent token，P0 已接近）、内容区 iframe 底色与壳底一致。不做清单外组件（无命令面板/Inspector 重构）。
+底座章节补第三工具范例：新增工具三步（引擎包 → plugin.py → 注册表登记）+ roi 工具简介。
 
 ## Testing Decisions
 
-好测试标准：测外部行为（文件系统结果、HTTP 响应），不测内部实现；迁移逻辑先用 tmp 目录验证再碰真实数据。
-
-- **新 seam 1：迁移纯函数**（tests/test_migrate.py，tmp_path）：空目录无操作；源有数据目标无 → 全部移动；冲突（目标已有不同文件）→ 跳过并报告、源不被删；目标存在源不存在 → 视为已迁移。目标存在源不存在 → 视为已迁移，跳过。
-- **新 seam 2：导出下载 HTTP**（tests/test_workbench.py 增补）：`/t/forecast/api/export/report` 对存在文件 200、不存在 404；`/t/coupon/api/export/{run_id}/markdown` 收编后路径正常。
-- **回归 seam**：`tests/` 113 项存量测试零断言修改全绿（硬门槛）。
-- **端到端**：真实仓库执行一次 migrate（本机数据），壳起服务验证两工具 state 正常、forecast 报表可下载。
+- **主 seam：引擎纯函数**（tests/test_roi_engine.py）：黄金案例手工算定（一个正向计划、一个亏损计划、一个边界计划）；公式不变量（盈亏平衡 CVR* 下 net≈0）；情景单调性（挑战 net ≥ 基准 ≥ 保守）；校验 422 矩阵。
+- **HTTP seam**（tests/test_workbench.py 增补或 tests/test_roi_server.py）：壳内 /t/roi/api/state、POST calc 端到端、422 路径、未知路由 404、静态页服务。
+- **守护 seam**：底座零改动 diff 检查（REVIEW 复核 + 切片完成时人工 git diff --stat）；静态不变量（roi_tool/static 无根绝对 /api）。
+- **回归 seam**：全部存量测试（含 K3 授权的一处断言更新）绿。
 
 ## Out of Scope
 
-- P2（投放 ROI 工具）、P3（LLM / pi agent sdk / actions 填充）。
-- forecast 在 serve 路径生成报表的新能力（下载只服务已有产物）。
-- 壳级导出聚合端点、插件协议为状态栏新增接口。
-- P0 审查遗留的 5 条非阻断建议（记录在 `.flow/archive/workbench-p0/review-findings.md`，不在 P1 处理）。
-- 引擎、口径、情景参数逻辑的任何改动。
+- LTV/复购归因、自然流量蚕食/增量测算、多触点模型（K2 显式排除）。
+- 真实广告平台数据接入与导入。
+- 持久化、运行封存、导出下载（无磁盘产物）。
+- actions 填充、LLM 接入（P3）。
+- forecast/coupon 的任何功能改动。
 
 ## GRILL 决议（自我拷问，2026-09-27）
 
-约束：proposal（P1）与 P0 继承决策不重新讨论；以下均为 PRD 未细化的开放点，按推荐自答，无升级项。
+约束：P2 proposal 与 P0/P1 继承决策不重新讨论；以下均为 PRD 未细化的开放点，按推荐自答，无升级项。
 
-**G1 — 冲突粒度：文件级。** 迁移判断逐文件（目标文件已存在且内容不同 → 跳过+报告；目录存在与否不构成冲突）。「workspace 存在但为空」正常搬迁。
+**G1 — 演示计划集内容（4 个合成计划）**：① 天猫直通车（搜索，高 CVR 稳赚）② 抖音千川（信息流，量大利薄、情景敏感）③ 京东快车（中规中矩、基准情景边界）④ 小红书聚光（高客单低 CVR、基准情景亏损但挑战转正——展示「结论随假设翻转」）。参数为合成假设，全响应带 `synthetic: true` 标注。
 
-**G2 — 旧目录清理：迁移后删除空目录。** apply 对已搬空的旧目录（data/、coupon_data/、output/ 内已空的子树）执行自底向上 rmdir（仅删空目录）；有冲突遗留的非空目录保留并列入报告。
+**G2 — 结论口径（引擎出事实，前端出 chip）**：引擎输出 net/ROI/cvr_star/gap（=cvr_star−cvr）与 `verdict`（net>0 → "净贡献为正"；否则 "净亏损"）+ `below_breakeven`（cvr<cvr_star）布尔。不做多档模糊评级（可投/观察/不投）——两档结论 + 事实字段足够，避免伪精确。
 
-**G3 — 目录自动创建。** migrate apply 与 forecast demo 生成路径都保证父目录自动创建（demo.generate 现状若已建目录则复用；缺失则补 mkdir parents）。
+**G3 — 情景默认增速**：保守 −20% / 基准 0% / 挑战 +20%，作用于 cvr 与 aov，其余平推；前端可调三档各自的增速值（与 forecast Inspector 调参体验一致）。
 
-**G4 — 迁移有冲突被跳过时不阻断启动。** 启动脚本输出冲突清单 + 提示，仍起服务（fail-closed 只针对「不覆盖文件」，服务可用性 fail-open）。
+**G4 — 引擎版本与契约**：`roi_tool/__init__.py` 暴露 `ENGINE_VERSION = "1.0"`；`/api/state` 返回 engine_version/演示 plans/参数默认值/情景定义/demo_used:true/synthetic 标注/boundary 本机运行声明（与 coupon state 契约同风格）。
 
-**G5 — forecast 导出端点的中文平台名。** `/t/forecast/api/export/metrics/{platform}` 的路径参数做 URL decode（%E5%A4%A9%E7%8C%AB ↔ 天猫）；未匹配到文件 404。前端生成链接时 encodeURIComponent。
+**G5 — demo_used 语义**：roi 无持久化，每次 calc 的 plans 来自请求体，/api/state 返回的 plans 恒为内置演示集——demo_used 恒 true、界面常驻「合成假设」标注，壳状态栏自动显示演示标记（D5 机制，零底座改动）。
 
-**G6 — WorkbenchState 的 root 语义不变。** 构造仍收仓库根，内部拼 `workspace/forecast/{orders,metrics}`；插件协议（P0）的 build_tool(root) 签名不动。
+**G6 — 前端参数编辑**：每计划六参数全部可编辑（number input，防抖 400ms 重算），情景切换即时重算；支持增删计划（最小实现：添加空白计划、删除行）——回答「多计划比较」故事的基本需要，不做计划模板/复制。
 
-**G7 — 测试数据环境。** 单测全部 tmp 目录；真实仓库迁移作为切片 5 的 e2e 冒烟执行一次（本机）；MacBook 端靠启动脚本在首次启动时自动迁移。
-
-**G8 — coupon 的 serve() 独立入口默认值同步。** `python -m coupon_tool serve --data-dir` 默认指向 workspace/coupon（与 plugin 一致），CLI 参数可覆盖行为不变。
+**G7 — K1 守护的操作化**：每个切片完成后 `git diff --stat <review_base> -- workbench/ target_forecast/ coupon_tool/` 必须为空（注册表一行除外），REVIEW 复核同一命令。
 
 ## Further Notes
 
-- 双机数据各自维护的现状不变：迁移在每台机器首次启动时各自执行，冲突跳过策略保证两端本地数据不被覆盖。
-- K3 的方向选择（forecast 只下载已有产物）如未来被证伪（用户想要在壳内一键生成报表），作为独立需求重新评估。
+- 若实现中暴露协议缺口（K1），处理顺序：停下 → 判断缺口 or 需求越界 → 缺口则补协议（显式记录于 PRD/history）→ 继续。
+- 演示计划集：3-4 个合成计划（如 天猫直通车/抖音千川/京东快车/小红书聚光 风格），参数为合成假设。
