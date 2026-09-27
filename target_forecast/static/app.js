@@ -33,7 +33,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 
 /* ---------- 启动 ---------- */
 async function boot() {
-  S.stateInfo = await (await fetch("/api/state")).json();
+  S.stateInfo = await (await fetch("api/state")).json();
   if (S.stateInfo.error) { document.body.textContent = "加载失败：" + S.stateInfo.error; return; }
   S.defaults = S.stateInfo.scenarios;
   S.params = JSON.parse(JSON.stringify(S.defaults));
@@ -46,7 +46,7 @@ async function boot() {
 }
 
 async function recalc() {
-  const r = await fetch("/api/calc", {
+  const r = await fetch("api/calc", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scenarios: S.params }),
@@ -413,7 +413,7 @@ function bindEvents() {
     $("#caliber-pane").hidden = btn.dataset.pane !== "caliber-pane";
   });
   $("#reload").addEventListener("click", async () => {
-    S.stateInfo = await (await fetch("/api/state?reload=1")).json();
+    S.stateInfo = await (await fetch("api/state?reload=1")).json();
     if (S.stateInfo.error) { toast("重载失败：" + S.stateInfo.error); return; }
     S.defaults = S.stateInfo.scenarios;
     S.params = JSON.parse(JSON.stringify(S.defaults));

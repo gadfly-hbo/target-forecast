@@ -1,53 +1,44 @@
 #!/bin/bash
-# 一键启动优惠券测算工作台（模式参考 deep-research/启动深度研究.command）
-# 流程：首次运行自动建 venv 装依赖 → 数据为空时播种合成演示场景 → 起本机服务 → 打开浏览器。
-# 退出：窗口内 Ctrl+C；已在运行时重复双击只聚焦浏览器，不重复起服务。
+# 兼容入口:优惠券测算已整合进「测算工作台」,本脚本启动同一壳服务并直达优惠券测算页。
+# 流程:壳服务已在运行 → 只打开浏览器;未运行 → 起壳服务后打开 /?tool=coupon。
 set -e
 cd "$(dirname "$0")"
 
-PORT=8310
-URL="http://127.0.0.1:${PORT}"
+PORT="${PORT:-8300}"
+URL="http://127.0.0.1:$PORT"
 
-echo "== 优惠券测算工作台 =="
-
-# 已在运行：直接打开浏览器退出，不重复起服务
-if curl -s -o /dev/null "${URL}/api/state"; then
-  echo "[已在运行] ${URL}"
-  open "${URL}"
+if curl -sf -o /dev/null --max-time 1 "$URL/api/state"; then
+  echo "[已在运行] 打开优惠券测算…"
+  open "$URL/?tool=coupon"
   exit 0
 fi
 
 if [ ! -x .venv/bin/python ]; then
   echo "[首次运行] 创建虚拟环境并安装依赖…"
   python3 -m venv .venv
-  .venv/bin/pip install -q --upgrade pip
   .venv/bin/pip install -q -r requirements.txt
 fi
 
-# 数据目录为空时播种演示场景（合成假设，非真实经营数据；真实数据可在工作台导入）
-if [ -z "$(ls -A coupon_data/scenarios 2>/dev/null)" ]; then
-  echo "[初始化] 写入合成演示场景（参数为合成假设，非行业真值）…"
-  .venv/bin/python - <<'PY'
-from coupon_tool import build_synthetic_spec
-from coupon_tool.storage import Store
-
-Store("coupon_data").save_spec(build_synthetic_spec())
-PY
+# 端口被其他进程占用时自动换空闲端口
+if ! .venv/bin/python -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',$PORT))" 2>/dev/null; then
+  echo "[端口] $PORT 已被其他进程占用,自动更换…"
+  PORT=$(.venv/bin/python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+  URL="http://127.0.0.1:$PORT"
 fi
 
+echo "[提示] 优惠券测算已整合进测算工作台(左侧导航可切换其他工具)"
 cleanup() {
   kill "$SERVER_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-echo "[启动] 本机服务 ${URL} (Ctrl+C 退出)"
-.venv/bin/python -m coupon_tool serve --port "$PORT" &
+.venv/bin/python -m workbench serve --port "$PORT" &
 SERVER_PID=$!
 
-for _ in $(seq 1 30); do
-  if curl -s -o /dev/null "${URL}/api/state"; then break; fi
+for i in $(seq 1 40); do
+  if curl -sf -o /dev/null "$URL/api/state"; then break; fi
   sleep 1
 done
-open "${URL}"
+open "$URL/?tool=coupon"
 
 wait "$SERVER_PID"

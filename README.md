@@ -19,19 +19,37 @@
 
 ## 快速开始
 
-**双击 `启动目标测算.command` 即可**（Finder/终端均可，双端通用）：首次运行自动建虚拟环境装依赖，`data/` 为空自动生成演示数据，起本机服务后自动打开浏览器；默认端口 8300，被占用时自动换空闲端口（`PORT=xxxx` 可覆盖），Ctrl+C 退出。
+**双击 `启动测算工作台.command` 即可**（Finder/终端均可，双端通用）：首次运行自动建虚拟环境装依赖，起本机服务后自动打开浏览器；默认端口 8300，被占用时自动换空闲端口（`PORT=xxxx` 可覆盖），Ctrl+C 退出。工作台左侧导航切换各测算工具。
+
+旧的 `启动目标测算.command` / `启动优惠券测算.command` 仍可用：壳服务已在运行时只打开对应工具页，未运行时启动同一个工作台后直达对应工具。
 
 命令行方式：
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-.venv/bin/python main.py serve      # 启动本地 HTML 工作台（http://127.0.0.1:8300）
-.venv/bin/python main.py demo       # 生成演示数据并跑通全流程（先看这个）
-.venv/bin/python main.py templates  # 生成两种输入模板到 templates/
-.venv/bin/python main.py run        # 用 data/ 下的正式数据测算
-.venv/bin/python -m pytest tests -q # 核心不变量测试
+.venv/bin/python -m workbench serve  # 启动测算工作台（http://127.0.0.1:8300，左侧导航切工具）
+.venv/bin/python main.py demo        # 目标测算：生成演示数据并跑通全流程（先看这个）
+.venv/bin/python main.py run         # 目标测算：用 data/ 下的正式数据测算
+.venv/bin/python -m coupon_tool demo # 优惠券测算：合成演示场景端到端
+.venv/bin/python -m pytest tests -q  # 全部测试（核心不变量 + 工作台冒烟）
 ```
+
+## 测算工作台底座（workbench/）
+
+两个测算工具跑在同一套底座上：**单一壳服务（单端口）+ 工具注册表 + 导航壳**。壳负责路由分发（`/t/{tool_id}/...` 剥离前缀后交给工具）、静态托管、工具导航；各工具的测算引擎与前端业务逻辑独立自治。新增测算工具（如投放 ROI）只需写一个引擎包 + `plugin.py` manifest（id/name/icon/static_dir/handle_get/handle_post，可选 seed_demo），在 `workbench/server.py` 注册表中登记即可，不改底座。
+
+```
+启动测算工作台.command            唯一入口（旧 .command 为兼容直达入口）
+workbench/                       底座：壳 server + 注册表 + 导航壳前端
+├── server.py                    / 壳页、/api/state 工具清单、/t/{id}/ 前缀分发
+├── registry.py                  插件协议（Tool Contract）
+└── static/                      壳前端（侧边栏导航 + iframe 装载 + ?tool= 深链）
+target_forecast/plugin.py        目标测算插件适配（/t/forecast/）
+coupon_tool/plugin.py            优惠券测算插件适配（/t/coupon/）
+```
+
+各工具的独立入口（`main.py serve`、`python -m coupon_tool serve`）保留可用，前端 API 全部相对路径，独立运行与壳内运行行为一致。manifest 预留 `actions` 字段（机器可读能力声明），为未来 LLM 驱动（pi agent sdk）接入预留接口。
 
 ## 本地工作台（main.py serve）
 

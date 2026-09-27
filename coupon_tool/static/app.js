@@ -12,7 +12,8 @@ async function api(path, body, method) {
   const opt = body !== undefined
     ? { method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
     : {};
-  const res = await fetch(path, opt);
+  // 相对路径：壳内（/t/coupon/）与独立运行（/）下都解析到本工具 API
+  const res = await fetch(path.replace(/^\//, ""), opt);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
@@ -82,7 +83,7 @@ $("btn-import").addEventListener("click", async () => {
   const rows = parseCsv($("import-csv").value);
   if (!rows.length) { toast("请先粘贴 CSV 数据"); return; }
   try {
-    const out = await api("/api/import", { mode: $("import-mode").value, rows, meta: {} });
+    const out = await api("api/import", { mode: $("import-mode").value, rows, meta: {} });
     S.imported = out;
     const errs = out.issues.filter((i) => i.level === "error");
     const warns = out.issues.filter((i) => i.level === "warning");
@@ -106,7 +107,7 @@ $("btn-apply-baseline").addEventListener("click", () => {
   switchView("params");
 });
 $("btn-templates").addEventListener("click", async () => {
-  try { const out = await api("/api/templates"); toast(`模板已生成：${out.files.join("、")}（${out.dir}/）`); }
+  try { const out = await api("api/templates"); toast(`模板已生成：${out.files.join("、")}（${out.dir}/）`); }
   catch (e) { toast(e.message); }
 });
 
@@ -125,7 +126,7 @@ function newScenario() {
 }
 async function loadDemo() {
   try {
-    const out = await api("/api/demo", {});
+    const out = await api("api/demo", {});
     S.scenario = out.scenario;
     S.comparison = null; S.stress = null;
     fillParamsForm();
@@ -231,7 +232,7 @@ function collectParams() {
 $("btn-save-scenario").addEventListener("click", async () => {
   try {
     const sc = collectParams();
-    const out = await api("/api/scenario/save", { scenario: sc });
+    const out = await api("api/scenario/save", { scenario: sc });
     const errs = out.validation.errors;
     $("params-validation").innerHTML = errs.length
       ? `<span class="fail-card">校验错误：${errs.join("；")}</span>`
@@ -247,7 +248,7 @@ $("btn-compare").addEventListener("click", async () => {
   if (!S.scenario) { toast("先加载或创建场景"); return; }
   try {
     collectParams();
-    const out = await api("/api/compare", { scenario: S.scenario });
+    const out = await api("api/compare", { scenario: S.scenario });
     S.comparison = out;
     renderComparison();
   } catch (e) { toast(e.message); }
@@ -346,7 +347,7 @@ $("btn-stress").addEventListener("click", async () => {
   document.querySelectorAll(".stress-var:checked").forEach((el) => { variants[el.dataset.variant] = JSON.parse(el.dataset.changes); });
   if (!Object.keys(variants).length) { toast("先勾选至少一个情景（范围必须显式）"); return; }
   try {
-    const out = await api("/api/stress", { scenario: collectParams(), variants });
+    const out = await api("api/stress", { scenario: collectParams(), variants });
     S.stress = out;
     const selLabel = S.selected || (S.comparison && S.comparison.ranking[0]) || "";
     let html = `<table class="tbl"><thead><tr><th>情景</th><th>所选候选 ΔΠ 元</th><th>预算超限</th><th>排序变化</th><th>仍可行</th></tr></thead><tbody>`;
@@ -371,14 +372,14 @@ $("btn-run").addEventListener("click", async () => {
   document.querySelectorAll(".stress-var:checked").forEach((el) => { variants[el.dataset.variant] = JSON.parse(el.dataset.changes); });
   const decision = { choice, reason: $("d-reason").value, confirmed_by: $("d-by").value, confirmed_at: new Date().toISOString() };
   try {
-    const out = await api("/api/run", { scenario: collectParams(), with_stress: Object.keys(variants).length > 0, variants, decision });
+    const out = await api("api/run", { scenario: collectParams(), with_stress: Object.keys(variants).length > 0, variants, decision });
     $("st-run").textContent = `最近运行：${out.run_id}`;
     $("run-out").innerHTML = `<div class="accent-card">已封存运行 <span class="mono">${out.run_id}</span>（结果不可变，可重放复核）</div>
       <p class="small">导出：
-        <a href="/api/export/${out.run_id}/markdown" target="_blank">Markdown 决策摘要</a> ·
-        <a href="/api/export/${out.run_id}/csv_candidates" target="_blank">CSV 候选表</a> ·
-        <a href="/api/export/${out.run_id}/csv_ledger" target="_blank">CSV 分支账本</a> ·
-        <a href="/api/export/${out.run_id}/json" target="_blank">JSON 运行记录</a></p>`;
+        <a href="api/export/${out.run_id}/markdown" target="_blank">Markdown 决策摘要</a> ·
+        <a href="api/export/${out.run_id}/csv_candidates" target="_blank">CSV 候选表</a> ·
+        <a href="api/export/${out.run_id}/csv_ledger" target="_blank">CSV 分支账本</a> ·
+        <a href="api/export/${out.run_id}/json" target="_blank">JSON 运行记录</a></p>`;
     toast("运行已封存并导出三格式");
     refreshState();
   } catch (e) { toast(e.message); }
@@ -387,7 +388,7 @@ $("btn-run").addEventListener("click", async () => {
 /* ---------------- ④ 历史与复盘 ---------------- */
 async function loadRuns() {
   try {
-    const runs = await api("/api/runs");
+    const runs = await api("api/runs");
     S.runs = runs;
     $("runs-list").innerHTML = runs.length ? runs.map((r) => `
       <div class="file" data-run="${r.run_id}">
@@ -411,10 +412,10 @@ async function showRun(runId) {
         <p class="small">${run.created_at} · 场景 ${run.scenario_id} · 引擎 ${run.engine_version} · 结论 ${conclusionChip(run.results.conclusion.type)}</p>
         ${topRow ? `<p class="small">排序首选：${topRow.label}　ΔΠ=${yuan(topRow.metrics.incremental_contribution_cents)} 元　商家券补=${yuan(topRow.metrics.merchant_subsidy_cents)} 元</p>` : ""}
         <p class="small">导出：
-          <a href="/api/export/${run.run_id}/markdown" target="_blank">Markdown</a> ·
-          <a href="/api/export/${run.run_id}/csv_candidates" target="_blank">CSV 候选表</a> ·
-          <a href="/api/export/${run.run_id}/csv_ledger" target="_blank">CSV 账本</a> ·
-          <a href="/api/export/${run.run_id}/json" target="_blank">JSON</a></p>
+          <a href="api/export/${run.run_id}/markdown" target="_blank">Markdown</a> ·
+          <a href="api/export/${run.run_id}/csv_candidates" target="_blank">CSV 候选表</a> ·
+          <a href="api/export/${run.run_id}/csv_ledger" target="_blank">CSV 账本</a> ·
+          <a href="api/export/${run.run_id}/json" target="_blank">JSON</a></p>
       </div>
       <div class="card"><div class="card-h">该运行的关键假设限制</div>
         ${(topRow && topRow.limitations || []).map((l) => `<div class="warn-card">${l}</div>`).join("") || "<p class='small text3'>—</p>"}
@@ -446,7 +447,7 @@ async function submitReview(runId) {
     params_patch,
   };
   try {
-    const out = await api("/api/review", body);
+    const out = await api("api/review", body);
     const rv = out.review;
     $("rv-out").innerHTML = `
       <div class="accent-card">预测基准：<b>${rv.selected_label}</b>（来源：${{explicit: "显式指定", decision: "人工决策记录", ranking_default: "排序第一（默认）"}[rv.chosen_source] || rv.chosen_source}）</div>
@@ -467,7 +468,7 @@ window.submitReview = submitReview;
 /* ---------------- 启动 ---------------- */
 async function refreshState() {
   try {
-    const st = await api("/api/state");
+    const st = await api("api/state");
     $("engine-ver").textContent = st.engine_version;
     $("st-dir").textContent = `数据目录 ${st.data_dir} · 导出 ${st.out_dir}`;
     if (st.runs.length) $("st-run").textContent = `最近运行：${st.runs[0].run_id}`;

@@ -164,51 +164,72 @@ def calc(state: WorkbenchState, cfg: dict, scenarios: dict) -> dict:
     }
 
 
+class _Responder:
+    """handler 的响应帮助方法（独立 server 与 workbench 壳分发共用）。"""
+
+    def __init__(self, h: BaseHTTPRequestHandler):
+        self.h = h
+
+    def send(self, code: int, body: bytes, ctype: str):
+        self.h.send_response(code)
+        self.h.send_header("Content-Type", ctype)
+        self.h.send_header("Content-Length", str(len(body)))
+        self.h.send_header("Cache-Control", "no-store")
+        self.h.end_headers()
+        self.h.wfile.write(body)
+
+    def json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        self.send(code, body, "application/json; charset=utf-8")
+
+
+def route_get(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path: str) -> bool:
+    """处理 GET；返回 False 表示未命中（调用方回 404）。path 保留 query string。"""
+    r = _Responder(h)
+    try:
+        if path in ("/", "/index.html"):
+            r.send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/style.css", "/app.js"):
+            f = STATIC_DIR / path.lstrip("/")
+            ctype = mimetypes.guess_type(f)[0] or "application/octet-stream"
+            r.send(200, f.read_bytes(), f"{ctype}; charset=utf-8")
+        elif re.match(r"^/api/state(\?|$)", path):
+            force = "reload=1" in path
+            r.json(state.state_payload(cfg, force=force))
+        else:
+            return False
+    except Exception as e:  # noqa: BLE001 —— 本地工作台把错误如实回给页面
+        r.json({"error": f"{type(e).__name__}: {e}"}, 500)
+    return True
+
+
+def route_post(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path: str) -> bool:
+    """处理 POST；返回 False 表示未命中（调用方回 404）。"""
+    r = _Responder(h)
+    try:
+        if path != "/api/calc":
+            return False
+        n = int(h.headers.get("Content-Length") or 0)
+        payload = json.loads(h.rfile.read(n) or b"{}")
+        scenarios = _validate_scenarios(payload.get("scenarios"), cfg["scenarios"])
+        r.json(calc(state, cfg, scenarios))
+    except Exception as e:  # noqa: BLE001
+        r.json({"error": f"{type(e).__name__}: {e}"}, 500)
+    return True
+
+
 def make_handler(state: WorkbenchState, cfg: dict):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # 安静模式，只记录错误
             pass
 
-        def _send(self, code: int, body: bytes, ctype: str):
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def _json(self, obj, code=200):
-            body = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8")
-            self._send(code, body, "application/json; charset=utf-8")
-
         def do_GET(self):
-            try:
-                if self.path in ("/", "/index.html"):
-                    body = (STATIC_DIR / "index.html").read_bytes()
-                    self._send(200, body, "text/html; charset=utf-8")
-                elif self.path in ("/style.css", "/app.js"):
-                    f = STATIC_DIR / self.path.lstrip("/")
-                    ctype = mimetypes.guess_type(f)[0] or "application/octet-stream"
-                    self._send(200, f.read_bytes(), f"{ctype}; charset=utf-8")
-                elif re.match(r"^/api/state(\?|$)", self.path):
-                    force = "reload=1" in self.path
-                    self._json(state.state_payload(cfg, force=force))
-                else:
-                    self._send(404, b"not found", "text/plain; charset=utf-8")
-            except Exception as e:  # noqa: BLE001 —— 本地工作台把错误如实回给页面
-                self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+            if not route_get(state, cfg, self, self.path):
+                _Responder(self).send(404, b"not found", "text/plain; charset=utf-8")
 
         def do_POST(self):
-            try:
-                if self.path != "/api/calc":
-                    self._send(404, b"not found", "text/plain; charset=utf-8")
-                    return
-                n = int(self.headers.get("Content-Length") or 0)
-                payload = json.loads(self.rfile.read(n) or b"{}")
-                scenarios = _validate_scenarios(payload.get("scenarios"), cfg["scenarios"])
-                self._json(calc(state, cfg, scenarios))
-            except Exception as e:  # noqa: BLE001
-                self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+            if not route_post(state, cfg, self, self.path):
+                _Responder(self).send(404, b"not found", "text/plain; charset=utf-8")
 
     return Handler
 
