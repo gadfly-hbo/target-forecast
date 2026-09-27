@@ -130,11 +130,21 @@ def _sidecar_dir(root: Path) -> Path:
     return Path(root).resolve() / "assistant-sidecar"
 
 
+def _find_node() -> str | None:
+    """node 可执行文件探测：PATH 优先，兼容 macbook 的 ~/.local/node 安装。"""
+    found = shutil.which("node")
+    if found:
+        return found
+    candidate = Path.home() / ".local" / "node" / "bin" / "node"
+    return str(candidate) if candidate.is_file() else None
+
+
 def maybe_start_sidecar(root: Path) -> subprocess.Popen | None:
     """node 与构建产物可用则拉起 pi sidecar（G5）；返回 None 表示降级。"""
     sidecar_dir = _sidecar_dir(root)
     entry = sidecar_dir / "dist" / "server.js"
-    if not entry.is_file() or shutil.which("node") is None:
+    node = _find_node()
+    if not entry.is_file() or node is None:
         return None
     cfg = resolve_llm_config(Path(root).resolve()) or {}
     env = {**os.environ,
@@ -142,7 +152,7 @@ def maybe_start_sidecar(root: Path) -> subprocess.Popen | None:
            "WORKBENCH_LLM_BASE_URL": cfg.get("base_url", MIMO_BASE_URL),
            "WORKBENCH_LLM_MODEL": cfg.get("model", DEFAULT_MODEL)}
     try:
-        proc = subprocess.Popen(["node", str(entry)], cwd=sidecar_dir, env=env,
+        proc = subprocess.Popen([node, str(entry)], cwd=sidecar_dir, env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         return None
