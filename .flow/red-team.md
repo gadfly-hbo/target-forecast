@@ -1,50 +1,53 @@
-# Red-Team: 测算工作台 P2 — 投放 ROI 工具验证插件协议（底座零改动）
+# Red-Team: 测算工作台 P3 — LLM 驱动（助手侧栏 + actions 声明 + 调参/解读闭环）
 
 ## Top Kill-Assumptions (ranked)
 
-### K1 —「不改底座一行代码」与壳的既有行为自动兼容
-- **Claim:** roi 工具只需引擎包 + plugin.py + static 前端 + 注册表一行，壳的导航/状态栏/深链/分发自动生效。
-- **Steelman:** 协议字段（id/name/icon/handle_get/handle_post/seed_demo/actions）在 P0 设计、P1 状态栏（壳 fetch 工具 /api/state 的 demo_used）都是按「任意第三工具」语义实现的；demo_used 在 roi 的 /api/state 里给出即可自动显示演示标记。
-- **Fails if:** roi 的某个合理需求落在协议外——如需要壳在导航分组、需要 query 之外的路径语义、需要 seed_demo 之外的启动钩子、或 iframe 内需要壳传参。任一出现即「协议漏需求」，P2 必须停下来补协议（这正是 P2 的目的，但补协议必须作为显式决策记录，不能悄悄改）。
-- **Evidence（已取）:** workbench/registry.py 协议字段固定；workbench/server.py 分发纯前缀匹配、无工具类型特判；壳 app.js 对工具清单完全通用（P0 审查已确认）。
-- **Kill criterion:** 实现中出现「workbench/ 必须改行为才能用」的时刻 → 停下，评估是协议缺口（补协议+记录）还是 roi 需求越界（砍需求）。
-- **Cheapest test:** 切片 1 先写「底座零改动」守护测试：diff 检查 workbench/ 与两现有工具在 P2 全程不变（git diff --stat 基线对比）。
+### K1 —「引入 pi agent sdk」与纯 Python 仓库的工具链冲突
+- **Claim:** 可以用 pi-agent-core 驱动工作台助手。
+- **Steelman:** pi-agent-core 是用户已验证的栈（deep-research 生产在用）；sidecar 形态（Node 小服务 + Python 壳代理）是成熟解耦模式；助手后端抽象层让 sidecar 可插拔。
+- **Fails if:** 用户不接受本仓库引入 node/npm（双机都要装、要同步 node_modules、启动脚本变复杂），或者 sidecar 的运维成本超过其价值——尤其是 P3 首要闭环（调参+解读）其实只需要「一次 LLM 调用 + 工具调用」，pi-agent 的完整 agent 循环在此阶段收益有限。
+- **Evidence（已取）:** 本仓库 requirements.txt 仅 pandas/openpyxl/PyYAML/pytest，全部 stdlib server；sibling 项目证明 pi 栈可用但均为 TS 项目；双机同步现状是 git 同步代码 + 各自维护数据——node_modules 不入 git，双端要各自 npm install。
+- **Kill criterion:** 用户在 diff 门否定 node 工具链引入 → 改走「Python 直连 OpenAI 兼容 API + 后端抽象层」形态，pi-agent 降级为未来的可选后端。
+- **Cheapest test:** diff 门直接问（架构是 scope 级决策，有明确备选，符合升级条件）。
 
-### K2 — ROI 模型简单到可用，而不是简单到被弃用
-- **Claim:** 推荐基线（点击=消耗÷CPC，GMV=点击×CVR×客单，净毛利=GMV×(1−退款)×毛利率−消耗）是用户要的测算。
-- **Steelman:** 线上零售投放核算的行业标准链路就是消耗→点击→订单→GMV→毛利；盈亏平衡 CVR 直接回答「这条计划值不值得投」；与 coupon 工具「允许不投成为结论」的哲学一致。
-- **Fails if:** 用户实际想要的是更复杂的模型（复购 LTV、自然流量蚕食/增量归因、多触点）——MVP 交付后被认为玩具。
-- **Kill criterion:** 用户在 PRD diff 门否定模型基线 → 先定模型再动工，这是本流程的第一个门。
-- **Cheapest test:** PRD diff 门本身就是这个测试——用户在动工前看到完整公式。
+### K2 —没有可用的 LLM key，P3 的真身闭环无法在本环境验证
+- **Claim:** 自然语言调参/解读闭环可交付且可验证。
+- **Steelman:** key 可能存在于用户交互式 shell（env 探查受非交互限制）；即使无 key，也可交付「后端抽象 + 录制回放后端」，回放后端用预录 LLM 响应驱动完整闭环并通过测试。
+- **Fails if:** 交付物在任何真实环境都跑不起来（key 配置路径不通），或回放后端被误当成真 LLM。
+- **Evidence（已取）:** 非交互 shell env 无任何 ANTHROPIC/OPENAI key；deep-research 的 key 来源未确认。
+- **Kill criterion:** 配置路径无法实现「env 或本地文件供 key，不入 git」→ 停下来定配置形态。
+- **Cheapest test:** 回放后端驱动端到端助手测试；真身联调列为用户侧验收（README 写明）。
 
-### K3 —「底座零改动」与存量测试的硬冲突（已确证）
-- **Claim:** P2 后存量测试仍全绿。
-- **Steelman:** 引擎/协议/现有工具不动，绝大多数测试不受影响。
-- **Fails if:** `tests/test_workbench.py::test_default_registry_builds_all_tools` 断言 `set(reg.ids()) == {"forecast", "coupon"}` 且名称集合相等——注册 roi 后**必然失败**。这不是回归，是产品正确性变化（工具变多），但按 P1 的「断言零修改」先例会被误判为破坏。
-- **Evidence（已取）:** tests/test_workbench.py 中该测试精确断言两工具集合；shell 页导航/其他测试用包含式或动态断言不受影响。
-- **Kill criterion:** 无——此冲突不可避免，必须在 PRD diff 门显式披露并获得确认：允许把该断言更新为「包含 forecast/coupon 且总数≥2」式的超集校验（唯一被允许的存量断言修改）。
-- **Cheapest test:** 切片 1 先改这一处断言并跑全绿，其余断言冻结。
+### K3 —actions 声明与三工具 API 的真实对齐
+- **Claim:** manifest 的 actions（JSON Schema）能真实生成可用的 LLM tool 定义。
+- **Steelman:** 三工具 API 是扁平 JSON，tool 定义可机械生成；forecast 已有 demo_used、roi 已有参数默认值，输入结构清晰。
+- **Fails if:** 某些自然语言意图需要的参数（如 forecast 的情景结构、coupon 的 scenario 全文）超出「单次工具调用」的整洁边界，actions 变得要么太粗（无用）要么太细（LLM 填不动）。
+- **Kill criterion:** 某工具的 action 设计需要改动其 API 行为 → 只加只读/兼容端点，不改行为；仍不行则该工具 actions 留空并记录原因。
+- **Cheapest test:** 切片 1 为每工具写 2-3 个 action 的 JSON Schema 草案 + 工具生成器的单元测试（schema 完整性、可序列化）。
 
-### K4 — 演示数据的合成标注惯例被遵守
-- **Claim:** roi 演示计划集标注为合成假设。
-- **Fails if:** 演示数被当成行业真值引用。coupon 已有 synthetic 标注惯例（README 与界面），roi 必须同等标注。
-- **Cheapest test:** 静态断言演示响应带 synthetic 标记 + UI 常驻标注。
+### K4 —LLM 调参的写操作安全
+- **Claim:** 助手可以替用户调参（写操作）。
+- **Steelman:** 本地单机工具、无共享状态、改错可撤销（刷新即恢复默认）。
+- **Fails if:** 用户不接受 LLM 直接改参数（误调成本虽低但信任成本高），或写操作无确认门导致「LLM 连环误调」。
+- **Kill criterion:** 用户在 diff 门要求只读 → 助手 P3 只保留解读与导航，调参推迟。
+- **Cheapest test:** diff 门确认 + 实现时写操作必须经用户确认点击（前端确认门，非 LLM 自律）。
 
-### K5 — 第三工具的工程量在 MVP 边界内不失控
-- **Claim:** 引擎（纯函数）+ 单页前端 + plugin + 测试，一次 flow 内完成。
-- **Fails if:** 前端仿 forecast 仪表盘全套（图表/Inspector/多视图）被搬过来——那超出 MVP。
-- **Kill criterion:** 前端切片出现图表库/多视图架构 → 砍到「计划表 + 情景切换 + 参数侧栏 + 结果表」。
-- **Cheapest test:** 切片拆解时前端范围写成显式清单。
+### K5 —助手侧栏与壳的共存
+- **Claim:** 右侧助手面板不破坏现有三栏/iframe 布局与工具自治。
+- **Steelman:** 壳前端是自有代码，加可开合 aside 不碰工具 iframe；P1 状态栏模式可复用。
+- **Fails if:** 助手需要穿透 iframe 感知工具内部状态（如 forecast 当前选中的情景）——跨 iframe 状态桥是 P0 G1 明确推迟的复杂度。
+- **Kill criterion:** 助手需要 iframe 内状态才能回答 → 改为「助手操作通过 API 完成并刷新 iframe」，iframe 内状态由工具页自己呈现，助手不感知。
+- **Cheapest test:** 助手全部动作走 `/t/{id}/api/`（现有网关），零 iframe 桥接。
 
 ## What's Well-Reasoned
 
-- P2 把「协议验证」作为验收本质是对的：底座零改动不是洁癖，是迫使协议缺陷暴露的手段；K1 的 kill criterion 已把「补协议」路径显式化。
-- 模型基线用行业 standard 链路，且 MVP 明确排除 LTV/增量归因——避免在验证协议的工具里埋产品深水区。
-- K3 冲突在 ASSESS 阶段就被 grep 确证而非实现期爆雷，diff 门披露即可。
+- 「先自然语言调参+解读闭环、自主多步延后」的 P0 路线判断——单轮 tool-call 闭环已能覆盖大部分价值，agent 编排是独立深坑。
+- actions 从 manifest 生成的设计（P0 预留）意味着 P3 不需要新的工具发现机制。
+- 回放后端作为测试基建是诚实做法：这个仓库的测试哲学（黄金值、不变量）与 LLM 不确定性天然冲突，回放让回归可测。
 
 ## What I Couldn't Assess
 
-- 用户对 ROI 模型基线的真实期望（K2，只能靠 diff 门）。
-- roi 工具未来是否要接真实消耗数据（影响是否预留导入接口）——MVP 不做，P3/后续再定。
+- 用户是否有稳定的 LLM key 来源（只能 diff 门问）。
+- pi-agent-core 在助手场景的 token 成本与延迟是否可接受（用量小，预计无感）。
 
-**Verdict: GO** — K3 是唯一已确证的冲突且解法明确（披露+一处断言更新授权），K1/K2 各有显式门（K2=diff 门，K1=守护测试）。
+**Verdict: GO** — K1/K2/K4 都是「diff 门一次问清」的决策型假设，有明确备选与推荐；无已满足 kill criterion 的死亡假设。

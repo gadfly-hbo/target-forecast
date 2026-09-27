@@ -37,6 +37,13 @@ async function boot() {
   if (S.stateInfo.error) { document.body.textContent = "加载失败：" + S.stateInfo.error; return; }
   S.defaults = S.stateInfo.scenarios;
   S.params = JSON.parse(JSON.stringify(S.defaults));
+  // 助手调参（P3）：服务端持久化的情景补丁在启动时应用，刷新后生效
+  try {
+    const ap = await (await fetch("api/assistant_params")).json();
+    for (const [sc, patch] of Object.entries(ap.scenarios || {})) {
+      S.params[sc] = { ...(S.params[sc] || {}), ...patch };
+    }
+  } catch { /* 无补丁或不可达时保持默认 */ }
   buildNav();
   buildSeg();
   buildParamsPane();

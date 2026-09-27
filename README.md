@@ -60,6 +60,18 @@ roi_tool/plugin.py               投放 ROI 测算插件适配（/t/roi/）
 
 **数据布局**：所有工具数据收编在 `workspace/{tool_id}/` 下（`workspace/forecast/{orders,metrics,output}`、`workspace/coupon/{scenarios,runs,…,output}`），不入 git。旧版顶层的 `data/`、`coupon_data/`、`output/` 在首次启动时由启动脚本自动无损迁移（`python -m workbench migrate`，幂等；目标已存在且内容不同的文件会跳过并提示，绝不覆盖）。导出下载统一在 `/t/{id}/api/export/...`：目标测算报表与中间指标、优惠券三格式导出均可直接在浏览器下载。
 
+## 测算助手（P3，LLM 驱动）
+
+壳右下「🤖 助手」打开对话侧栏：用自然语言问数（「基准情景净贡献是多少」）或调参（「把挑战情景新客增速调到 25%」）。助手把意图转成对当前工具的 API 调用（tool calling，能力清单来自各插件 manifest 的 `actions` 声明），**修改参数的调用必须经你点击确认才生效**，确认后参数落盘（`workspace/{tool}/assistant_params.json`）并刷新工具页。
+
+**LLM 后端**（自动探测，启动日志明示当前后端）：
+
+1. **pi-agent sidecar**（首选）：`assistant-sidecar/` 用 `@earendil-works/pi-ai` 驱动小米 MIMO（与 deep-research 同栈）；壳在 node 可用且已构建（`cd assistant-sidecar && npm install && npm run build`）时自动拉起 127.0.0.1:8321。
+2. **OpenAI 兼容直连**：无 sidecar 但有 key 时由 Python 壳直连。
+3. **回放模式**：两者皆无时的兜底，界面明示「回放模式（非真 LLM）」，响应来自预录脚本。
+
+**key 配置**（三选一，自动探测按序）：`workspace/assistant.env` 写 `WORKBENCH_LLM_API_KEY=...`（可选 `BASE_URL`/`MODEL`）→ 复用 ZCode 配置的小米 MIMO provider（`~/.zcode/v2/provider_config.json`，自动读取）→ env 变量。默认模型 `mimo-v2.6-pro`（`https://token-plan-cn.xiaomimimo.com/v1`，实测 chat/completions 可用）。凭证不入 git。
+
 ## 本地工作台（main.py serve）
 
 浏览器打开 `http://127.0.0.1:8300`（`--port` 可换端口）。数据与测算全部在本机完成，`workspace/forecast/` 为空时自动生成演示数据。

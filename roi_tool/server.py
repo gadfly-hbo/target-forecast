@@ -70,7 +70,31 @@ def state_payload() -> dict:
     }
 
 
-def route_get(h: BaseHTTPRequestHandler, path: str) -> bool:
+class App:
+    """roi 工作台上下文（P3）：注入仓库根，assistant_params 落盘到 workspace/roi/。
+
+    引擎仍无业务持久化；root 仅为助手调参通道服务（测试可隔离）。
+    """
+
+    def __init__(self, root: Path):
+        self.root = Path(root).resolve()
+
+    def params_path(self) -> Path:
+        return self.root / "workspace" / "roi" / "assistant_params.json"
+
+    def load_assistant_params(self) -> dict:
+        f = self.params_path()
+        if f.is_file():
+            return json.loads(f.read_text(encoding="utf-8"))
+        return {}
+
+    def save_assistant_params(self, store: dict) -> None:
+        f = self.params_path()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def route_get(app: App, h: BaseHTTPRequestHandler, path: str) -> bool:
     """处理 GET；返回 False 表示未命中（调用方回 404）。"""
     r = _Responder(h)
     if path in ("/", "/index.html"):
@@ -81,14 +105,31 @@ def route_get(h: BaseHTTPRequestHandler, path: str) -> bool:
         r.static("app.js")
     elif path == "/api/state":
         r.json(state_payload())
+    elif path == "/api/assistant_params":
+        r.json(app.load_assistant_params())
     else:
         return False
     return True
 
 
-def route_post(h: BaseHTTPRequestHandler, path: str) -> bool:
+def route_post(app: App, h: BaseHTTPRequestHandler, path: str) -> bool:
     """处理 POST；返回 False 表示未命中（调用方回 404）。"""
     r = _Responder(h)
+    if path == "/api/assistant_params":
+        # 写操作：助手调参（经确认门后由壳执行到此），按计划名合并补丁；
+        # 未知计划名拒绝（防 LLM 幻觉名落盘）
+        body = r.read_body()
+        known = {p["name"] for p in demo.build_demo_plans()}
+        unknown = [n for n in (body.get("plans") or {}) if n not in known]
+        if unknown:
+            r.json({"error": f"未知计划名：{'、'.join(unknown)}（现有：{'、'.join(sorted(known))}）"}, 422)
+            return True
+        store = app.load_assistant_params()
+        for name, params in (body.get("plans") or {}).items():
+            store.setdefault("plans", {}).setdefault(name, {}).update(params or {})
+        app.save_assistant_params(store)
+        r.json({"saved": True, "plans": store.get("plans", {})})
+        return True
     if path != "/api/calc":
         return False
     body = r.read_body()
@@ -103,24 +144,26 @@ def route_post(h: BaseHTTPRequestHandler, path: str) -> bool:
     return True
 
 
-def make_handler():
+def make_handler(app: App | None = None):
+    app = app or App(Path.cwd())
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # 安静模式
             pass
 
         def do_GET(self):
-            if not route_get(self, self.path):
+            if not route_get(app, self, self.path):
                 _Responder(self).json({"error": "not found"}, 404)
 
         def do_POST(self):
-            if not route_post(self, self.path):
+            if not route_post(app, self, self.path):
                 _Responder(self).json({"error": "not found"}, 404)
 
     return Handler
 
 
 def serve(port: int = 8320):
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler())
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(App(Path.cwd())))
     print(f"投放 ROI 测算工作台：http://127.0.0.1:{port}（本机运行）")
     try:
         httpd.serve_forever()

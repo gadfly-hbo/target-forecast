@@ -1,48 +1,38 @@
-# Proposal — 测算工作台整合 P2：投放 ROI 测算工具（插件协议验证）
+# Proposal — 测算工作台整合 P3：LLM 驱动（助手侧栏 + actions 能力声明）
 
-来源：2026-09-27 会话，用户指示「P2」。本文件为 P2 flow 的最高规格源。P0/P1 交付事实见 `.flow/archive/workbench-p{0,1}/`。
+来源：2026-09-27 会话，用户指示「P3」。本文件为 P3 flow 的最高规格源。P0/P1/P2 交付事实见 `.flow/archive/workbench-p{0,1,2}/`。
 
-## 继承的 P2 定义（来自 P0 proposal 分期路线，不可推翻）
+## 用户原始需求（最初愿景，逐字要点，2026-09-26）
 
-> P2：投放 ROI 测算验证插件协议（新工具不改底座一行代码）。
+「未来还要引入 pi agent sdk + llm 等，用 llm 驱动测算工作台。」
 
-这带来 P2 的验收本质：**第三个工具必须只由「引擎包 + plugin.py manifest + 自己的 static 前端」构成，`workbench/` 底座、forecast/coupon 两工具零改动**（缺陷修复除外——若发现必须改底座，说明协议漏了需求，回头补协议并记录，这正是 P2 要暴露的）。
+P0 分期路线对 P3 的定义（继承，不可推翻）：**P3：引入 pi agent sdk + LLM（助手侧栏、补 actions 声明、先自然语言调参+解读闭环，再考虑自主多步测算）**。
 
-## 用户原始需求（本次会话逐字要点）
+## 环境探查事实（ASSESS 取得，约束 P3 形态）
 
-「P2」——即执行上述继承定义。ROI 测算的业务模型细节用户未指定，属于本 flow 要在 PRD diff 门呈现的推荐基线。
+1. **pi agent sdk 已确证为 `@earendil-works/pi-agent-core`（npm/TypeScript）**，配套 `@earendil-works/pi-ai`（provider 抽象：anthropic-messages / openai-completions API，`getBuiltinModel` 内置模型表，`runAgentLoop` 代理循环）。用户 sibling 项目 deep-research（`src/adapters/live.ts`）与 flow-center（「pi-agent 工作流套壳工作台」）已在生产使用此栈——**不是假想依赖**。
+2. **本仓库是纯 Python（stdlib）栈**，无 node/npm 构件；引入 pi-agent-core 意味着引入 Node sidecar 或换栈。
+3. **本 shell 环境未发现 LLM API key 环境变量**（ANTHROPIC/OPENAI 均无）；deep-research 的 key 来源未确认（可能在交互式 shell 配置）。
+4. 三工具 manifest 的 `actions` 字段均已留空（P0 预留），插件协议其余部分对助手场景完备（单 API 网关 `/t/{id}/api/`、状态栏、深链）。
 
-## 已有约束（P0/P1 沉淀，对 P2 有约束力）
+## 本 flow（P3）范围
 
-- 插件协议：manifest 字段 id/name/icon/static_dir/seed_demo/actions=[]/handle_get/handle_post；路由函数收已剥离 `/t/{id}` 前缀的 path（保留 query）。
-- 数据布局：`workspace/{tool_id}/`（P1）；目标测算数据在 `workspace/forecast/`，优惠券在 `workspace/coupon/`。
-- 导出约定：`/t/{id}/api/export/...` 只服务已有磁盘产物（P1 D4）。
-- 前端：API 全部相对路径，禁止根绝对 `/api` 引用（不变量测试）。
-- 设计语言：工具内部视觉自治；壳按 Xanthil 基线。
-- 注册：在 `workbench/server.py` 的 `build_default_registry` 登记（G4 显式清单）——这是唯一允许的"底座接触点"，登记一行不算改底座行为。
-- 不过度设计（K5/G7）：不做当前工具不用的底座功能；actions 留空（P3 才填充）。
+### 方向（细节在 PRD diff 门确认）
 
-## 本 flow（P2）范围
+- **助手侧栏**：壳右侧可开合的助手面板，对话式交互；上下文 = 当前激活工具。
+- **actions 能力声明填充**：三插件 manifest 补 `actions`（JSON Schema 描述可调用的测算能力），壳或助手后端据此生成 LLM tool 定义——P0 预留位的首次落地。
+- **自然语言调参 + 解读闭环（P3 首要交付）**：用户对助手说「基准情景新客增速调到 20%」「解读一下为什么保守情景全渠道 GMV 下降」，助手调用工具完成并用人话回复。**自主多步测算是 P3 之后的演进，不在本 flow**（P0 路线原文）。
+- **LLM 后端**：诚实面对栈差异（见红队 K1），推荐「助手后端抽象层 + pi-agent-core Node sidecar 为真身 + 离线降级」的分层形态，diff 门由用户拍板。
 
-### 推荐基线：投放 ROI 测算模型（业务细节 PRD diff 门确认）
+### 明确不做
 
-- **对象**：多个投放计划（渠道/计划名），单计划独立核算 + 汇总比较。
-- **输入参数**（每计划）：消耗（元）、CPC（元/点击）、转化率 CVR、客单价、毛利率、退款率。
-- **测算链路**：点击 = 消耗 ÷ CPC；订单 = 点击 × CVR；GMV = 订单 × 客单；净毛利 = GMV × (1−退款率) × 毛利率 − 消耗；ROI = GMV ÷ 消耗。
-- **三档情景**（与现有工具一致风格）：保守/基准/挑战，调 CVR 与客单增速（±），其余平推。
-- **输出**：每计划 ROI / 净贡献 / 盈亏平衡 CVR（使净毛利=0 的 CVR）/ 是否达标；汇总合计与排序；「不值得投」允许成为结论（参照 coupon 决策层哲学）。
-- **演示数据**：内置合成演示计划集（标注为合成假设），空数据自动播种。
-
-### 明确不做（MVP 边界）
-
-- 无持久化存储、无运行封存（coupon 的 runs/review 是 coupon 的深度，不是底座义务）。
-- 无导出端点（无磁盘产物；P1 D4 约定只服务已有产物）。
-- 不接真实广告平台数据（没有数据源；导入能力如有真实需求另立项）。
-- actions 字段仍留空；不动 forecast/coupon/workbench 的任何代码与测试断言。
+- 自主多步测算/自动 agent 编排（P3 之后）。
+- 更换现有三工具的技术栈；对 forecast/coupon/roi 业务逻辑的任何改动（actions 声明与必要的只读辅助端点除外，diff 门披露）。
+- 真实广告平台/数据源接入。
 
 ## 开放问题（留给 PRD/GRILL）
 
-- ROI 模型参数与公式细节是否按推荐基线（diff 门确认）。
-- 工具 id 与命名（推荐 `roi` / 「投放 ROI」）。
-- 演示计划集的内容设计。
-- 前端形态（参照 forecast 仪表盘 vs coupon 页签，推荐 forecast 式单页：计划表 + 情景切换 + 参数侧栏）。
+- 架构：Node sidecar（pi-agent-core 真身）vs Python 直连 OpenAI 兼容 API vs 分层双后端——**含对本仓库引入 node 工具链的取舍**。
+- LLM key 的配置形态（env / 本地配置文件，不入 git）。
+- 助手的能力边界：只读解读 + 调参，还是也允许触发测算/导出（写操作确认门）。
+- actions 的 Schema 粒度（每工具 3-6 个 action 为宜）。

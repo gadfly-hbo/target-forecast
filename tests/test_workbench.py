@@ -304,6 +304,20 @@ def test_shell_statusbar_xanthil_tokens(base_url):
     assert ".statusbar" in text and "#f0efec" in text  # surface-2 底
 
 
+def test_shell_assistant_panel(base_url):
+    """P3 切片 4：助手面板结构 + 确认门 + 503 降级渲染逻辑可达。"""
+    _, html = _get(base_url + "/")
+    text = html.decode()
+    assert 'id="assistant"' in text and 'id="as-msgs"' in text and 'id="as-input"' in text
+    assert "assistant-toggle" in text
+    _, js = _get(base_url + "/app.js")
+    jst = js.decode()
+    assert "api/assistant/chat" in jst          # chat 端点（相对路径）
+    assert "pending_confirmation" in jst        # 确认门渲染
+    assert "setup_hint" in jst                  # 503 降级指引
+    assert "confirm" in jst                     # 两步确认回发
+
+
 def test_default_registry_builds_all_tools():
     """默认注册表装配全部插件（启动脚本路径）。
 

@@ -48,3 +48,45 @@ body {
   color: #92400e; background: #fdf1e2; border: 1px solid #f0dfc2;
 }
 .hidden { display: none; }
+
+/* 助手侧栏（P3）：右侧 320px 抽屉 */
+.as-toggle {
+  padding: 1px 10px; border: 1px solid #cfcdc6; border-radius: 999px;
+  background: #ffffff; color: #0f766e; cursor: pointer; font-size: 10.5px;
+}
+.as-toggle:hover { background: #e6f4f2; }
+.assistant {
+  position: fixed; top: 0; right: 0; width: 320px; height: 100vh;
+  display: flex; flex-direction: column;
+  background: #ffffff; border-left: 1px solid #cfcdc6; z-index: 10;
+}
+.as-head {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; font-size: 13.5px; font-weight: 600;
+  border-bottom: 1px solid #e2e0db;
+}
+.as-backend { font-size: 10.5px; font-weight: 400; color: #8a877e; }
+.as-msgs { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.as-msg { max-width: 92%; padding: 7px 10px; border-radius: 10px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; }
+.as-msg.user { align-self: flex-end; background: #e6f4f2; color: #0b5c55; }
+.as-msg.bot { align-self: flex-start; background: #f0efec; color: #1f1e1b; }
+.as-msg.tool { align-self: flex-start; background: #efecfb; color: #5b48c0; font-size: 11px; }
+.as-msg.err { align-self: flex-start; background: #fbeaea; color: #b91c1c; font-size: 11.5px; }
+.as-confirm {
+  flex: none; margin: 0 12px 8px; padding: 10px; border: 1px solid #f0dfc2;
+  border-radius: 10px; background: #fdf1e2; font-size: 12px;
+}
+.as-confirm .as-confirm-btns { display: flex; gap: 8px; margin-top: 8px; }
+.as-confirm button {
+  padding: 4px 14px; border-radius: 6px; border: 1px solid #cfcdc6;
+  background: #ffffff; cursor: pointer; font-size: 12px;
+}
+.as-confirm button.primary { background: #0f766e; color: #ffffff; border-color: #0f766e; }
+.as-inputbar { flex: none; display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid #e2e0db; }
+.as-inputbar input {
+  flex: 1; padding: 7px 10px; border: 1px solid #e2e0db; border-radius: 6px; font-size: 12.5px;
+}
+.as-inputbar button {
+  padding: 7px 14px; border: none; border-radius: 6px;
+  background: #0f766e; color: #ffffff; cursor: pointer; font-size: 12.5px;
+}

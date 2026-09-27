@@ -10,3 +10,7 @@ workspace/
 
 # 本地 flow 状态
 .flow/state.json
+
+# 助手 sidecar（P3）：node 产物不入库，双端各自 npm install + build
+assistant-sidecar/node_modules/
+assistant-sidecar/dist/

@@ -183,6 +183,29 @@ class _Responder:
         body = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send(code, body, "application/json; charset=utf-8")
 
+    def read_body(self) -> dict:
+        length = int(self.h.headers.get("Content-Length") or 0)
+        if not length:
+            return {}
+        return json.loads(self.h.rfile.read(length).decode("utf-8"))
+
+
+def _assistant_params_path(root: Path) -> Path:
+    return root / "workspace" / "forecast" / "assistant_params.json"
+
+
+def load_assistant_params(root: Path) -> dict:
+    f = _assistant_params_path(root)
+    if f.is_file():
+        return json.loads(f.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_assistant_params(root: Path, store: dict) -> None:
+    f = _assistant_params_path(root)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
 
 def route_get(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path: str) -> bool:
     """处理 GET；返回 False 表示未命中（调用方回 404）。path 保留 query string。"""
@@ -194,6 +217,9 @@ def route_get(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path:
             f = STATIC_DIR / path.lstrip("/")
             ctype = mimetypes.guess_type(f)[0] or "application/octet-stream"
             r.send(200, f.read_bytes(), f"{ctype}; charset=utf-8")
+        elif path == "/api/assistant_params":
+            # 助手调参持久化（P3）：前端启动时读取并应用，刷新后生效
+            r.json(load_assistant_params(state.root))
         elif re.match(r"^/api/state(\?|$)", path):
             force = "reload=1" in path
             r.json(state.state_payload(cfg, force=force))
@@ -225,6 +251,15 @@ def route_post(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path
     """处理 POST；返回 False 表示未命中（调用方回 404）。"""
     r = _Responder(h)
     try:
+        if path == "/api/assistant_params":
+            # 写操作：助手调参（经确认门后由壳执行到此），按情景合并补丁
+            body = r.read_body()
+            store = load_assistant_params(state.root)
+            for name, params in (body.get("scenarios") or {}).items():
+                store.setdefault("scenarios", {}).setdefault(name, {}).update(params or {})
+            save_assistant_params(state.root, store)
+            r.json({"saved": True, "scenarios": store.get("scenarios", {})})
+            return True
         if path != "/api/calc":
             return False
         n = int(h.headers.get("Content-Length") or 0)

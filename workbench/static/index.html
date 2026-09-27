@@ -22,10 +22,24 @@
       <span class="sb-sep">·</span>
       <span id="sb-tool" class="sb-item">—</span>
       <span id="sb-demo" class="sb-demo hidden">演示数据</span>
+      <button type="button" id="assistant-toggle" class="as-toggle" title="助手">🤖 助手</button>
       <span class="sb-spacer"></span>
+      <span id="sb-llm" class="sb-item"></span>
       <span class="sb-item sb-meta">全部数据与测算在本机完成，不上传明细数据</span>
     </footer>
   </div>
+  <aside id="assistant" class="assistant hidden" aria-label="测算助手">
+    <div class="as-head">
+      <span>测算助手</span>
+      <span id="as-backend" class="as-backend"></span>
+    </div>
+    <div id="as-msgs" class="as-msgs"></div>
+    <div id="as-confirm" class="as-confirm hidden"></div>
+    <div class="as-inputbar">
+      <input id="as-input" type="text" placeholder="问点什么，如：基准情景净贡献是多少" aria-label="助手输入">
+      <button type="button" id="as-send">发送</button>
+    </div>
+  </aside>
 </div>
 <script src="app.js"></script>
 </body>

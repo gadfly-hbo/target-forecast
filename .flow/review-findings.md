@@ -1,26 +1,30 @@
-# Review Findings — 测算工作台 P2（REVIEW round 1）
+# Review Findings — 测算工作台 P3（REVIEW round 1）
 
-Fresh-context reviewer verdict: **FAIL（spec 轴）/ PASS（code 轴）**；VERIFY 证据复跑一致（144 passed）；底座接触确认为「注册表一行 + 缺陷修复（含其注释）」，K1 守住。
+Fresh-context reviewer verdict: **FAIL**（VERIFY 复跑一致 161 passed，但绿套件与两个阻断缺陷共存）。
 
 ## BLOCKER（本周期修复）
 
-1. **演示计划集不满足 GRILL G1，且 demo.py 注释与实算相反** — 计划③京东快车 G1 要求「基准边界」，实算 base net=+9088.89；计划④小红书聚光 G1 要求「基准亏、挑战转正」，实算 base net=+8287.5 三档全正。注释「基准情景贴边」「基准亏、挑战转正」为不实陈述；测试只验合法性未守护 G1 行为意图。修复：重调 ③④ 参数使叙述成立 + 测试断言叙述 + 注释与实算一致。
+1. **forecast `_Responder` 缺 `read_body`** — assistant_params POST 在处理器内 AttributeError→500→回环断连，真实 confirm 路径必坏；测试未捕获因 service 用 FakeHttp、HTTP 测试明确跳过 confirm 步。修复：补 read_body + 真实回环 confirm 测试。
+2. **sidecar 自动启动路径算错** — `Path(root).parent/"assistant-sidecar"` 指向仓库父目录，G5 自动拉起永不发生（手工 e2e 恰好掩盖）。修复：`root/"assistant-sidecar"`。
 
-## SUGGESTION（本周期顺手修复——均为 PRD 明文条目或正确性小缺）
+## SUGGESTION（本周期修复——正确性类）
 
-2. 引擎缺「跨情景结论稳定性」输出（PRD D2 明示）→ 补 stability 映射 + 前端翻转标记。
-3. G4 契约缺「参数默认值」字段 → state_payload 补 param_defaults，前端添加计划改用之。
-4. 删除全部计划后结果表残留旧数据且无提示（正确性小缺）→ 修。
-5. test_roi_shell_pages 的 "recalc" in js 为字符串存在断言 → 换 fetch("api/calc 调用点检查。
+3. 同轮写调用伴随其他 tool_calls 被静默丢弃 → staging 前先执行同轮只读调用并标注丢弃数。
+4. roi 幻觉计划名无防御（盲合并且 `net=None` 崩溃）→ 服务端校验计划名 + 摘要兜底。
+5. `handle_chat` 不捕获回环 HTTPError → 断连无响应体；映射结构化 502。
+6. 取消的 confirm 永不清理（泄漏）→ 增加 cancel 路径（service+前端）。
+7. roi `_assistant_params_path` 用模块相对路径（测试隔离隐患）→ 注入 root（App 化）。
 
-## 待确认（记录）
+## 记录不处理
 
-- 缺陷修复行的注释是否占用「底座一行」配额：按「修复+注释=一个缺陷修复」认定合规。
+- test_shell_assistant_panel 仍是字符串存在断言（确认门前端行为级测试缺位——HTTP seam 已覆盖 API 层）。
+- 真实 LLM 会把情景键幻觉为 "baseline"（下游有兜底）；sidecar 无单测文件（转换器已对照 pi-ai 源码核验）。
+- fixtures 实现为 .py 模块而非目录（PRD 文微偏差，功能等价，追认）。
 
-## REVIEW round 2（2026-09-27）— PASS
+## REVIEW round 2（2026-09-27）— PASS（APPROVE_WITH_COMMENTS）
 
-Fresh-context reviewer verdict: **PASS**，无阻断。Round-1 blocker 为真修复（实算 ③ base −53.33 贴边、④ base −1027.5/挑战 +5120.4，注释与实算一致）；四项 SUGGESTION 全部落地可验证；底座接触面独立复核 = 恰好注册表一行 + 缺陷修复（含注释）；K3 断言冻结守住。
+Fresh-context reviewer verdict: **PASS**。Round-1 两阻断项独立复验确认修复（read_body + 真实回环 confirm 测试单跑 PASSED；sidecar 路径修复且实测自动启动 + 真 LLM 两轮 tool_call 闭环 32350.37）；全部建议项修复复验通过。
 
-**遗留 SUGGESTION（记录，不阻断）：**
-1. 畸形请求体容器类型（scenarios 非 dict 等）触发 AttributeError → 连接重置而非 422；与 coupon 服务端既定模式同款，前端无路径产生此类请求体。修复方向：catch 元组加 AttributeError。
-2. 重名计划的 stability/ranking 以名为键会互相覆盖（G6 允许改出重名）；cosmetic 边界。
+**round-2 建议（本轮已顺手修复）：** SIGTERM 孤儿 sidecar（serve 注册 SIGTERM→KeyboardInterrupt，实测 reap）；roi 死代码 shim 删除；同轮只读先执行 + dropped 计数与 net-None 兜底补回归测试；handle_chat 捕获 URLError。
+
+**记录不处理：** 确认门前端行为级测试缺位（HTTP seam 已覆盖 API）；forecast 情景名不做服务端校验（幻觉名落盘为脏键，长期项）；sidecar 无独立单测（真链路实测替代）。

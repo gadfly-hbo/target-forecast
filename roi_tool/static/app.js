@@ -24,6 +24,11 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 async function boot() {
   S.state = await api("api/state");
   S.plans = S.state.plans.map((p) => ({ ...p }));
+  // 助手调参（P3）：服务端持久化的计划参数补丁在启动时应用，刷新后生效
+  try {
+    const ap = await api("api/assistant_params");
+    for (const p of S.plans) Object.assign(p, (ap.plans || {})[p.name] || {});
+  } catch { /* 无补丁或不可达时保持演示值 */ }
   S.scenarios = JSON.parse(JSON.stringify(S.state.scenarios));
   S.current = Object.keys(S.scenarios).includes("基准") ? "基准" : Object.keys(S.scenarios)[0];
   buildScenarioSeg();

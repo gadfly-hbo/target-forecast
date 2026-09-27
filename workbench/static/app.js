@@ -41,8 +41,107 @@ async function main() {
   const requested = new URLSearchParams(location.search).get("tool");
   const first = st.tools.find((t) => t.id === requested) || st.tools[0];
   if (first) select(first.id);
+  initAssistant(() => document.querySelector(".nav-item.active")?.dataset.id || first?.id);
 }
 
 main().catch((e) => {
   $("nav").innerHTML = `<p class="err">工作台加载失败：${e.message}</p>`;
 });
+
+/* ---------- 测算助手（P3）：右侧抽屉，两步确认门，503 降级 ---------- */
+const As = { history: [], currentTool: null };
+
+function asEsc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+function asMsg(cls, text) {
+  const el = document.createElement("div");
+  el.className = `as-msg ${cls}`;
+  el.textContent = text;
+  $("as-msgs").appendChild(el);
+  $("as-msgs").scrollTop = $("as-msgs").scrollHeight;
+  return el;
+}
+
+async function asSend(payload) {
+  const res = await fetch("api/assistant/chat", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 503) {
+    asMsg("err", `助手未配置 LLM 后端。\n${data.setup_hint || ""}`);
+    return null;
+  }
+  if (!res.ok) { asMsg("err", `请求失败：${data.error || res.status}`); return null; }
+  return data;
+}
+
+async function asAsk() {
+  const text = $("as-input").value.trim();
+  if (!text) return;
+  $("as-input").value = "";
+  asMsg("user", text);
+  As.history.push({ role: "user", content: text });
+  const data = await asSend({ message: text, history: As.history.slice(-10), tool_id: As.currentTool });
+  if (!data) return;
+  if (data.pending_confirmation) {
+    As.history.push({ role: "assistant", content: data.reply });
+    asMsg("bot", data.reply);
+    asShowConfirm(data.pending_confirmation);
+  } else {
+    As.history.push({ role: "assistant", content: data.reply });
+    asMsg("bot", data.reply || "（无回复）");
+    (data.tool_calls || []).forEach((tc) => asMsg("tool", `⚙ ${tc.name}：${tc.summary || ""}`));
+    asRefreshFrame();
+  }
+}
+
+function asShowConfirm(pending) {
+  const box = $("as-confirm");
+  box.innerHTML = `
+    <div><b>待确认变更</b>（${asEsc(pending.action)}）</div>
+    <div>${asEsc(pending.preview)}</div>
+    <div class="as-confirm-btns">
+      <button type="button" class="primary" id="as-ok">确认执行</button>
+      <button type="button" id="as-cancel">取消</button>
+    </div>`;
+  box.classList.remove("hidden");
+  $("as-ok").addEventListener("click", async () => {
+    box.classList.add("hidden");
+    const data = await asSend({ confirm: pending.call_id, tool_id: As.currentTool });
+    if (!data) return;
+    As.history.push({ role: "assistant", content: data.reply });
+    asMsg("bot", data.reply);
+    (data.tool_calls || []).forEach((tc) => asMsg("tool", `⚙ ${tc.name}：${tc.summary || ""}`));
+    asRefreshFrame();  // 参数已落盘，刷新工具页使补丁生效
+  });
+  $("as-cancel").addEventListener("click", async () => {
+    box.classList.add("hidden");
+    asSend({ cancel: pending.call_id, tool_id: As.currentTool });  // 服务端清理 pending（一次性语义）
+    asMsg("bot", "已取消该变更。");
+  });
+}
+
+function asRefreshFrame() {
+  const f = $("frame");
+  if (f && f.src) f.contentWindow.location.reload();
+}
+
+function initAssistant(currentToolGetter) {
+  As.currentTool = currentToolGetter();
+  $("assistant-toggle").addEventListener("click", () => {
+    const panel = $("assistant");
+    panel.classList.toggle("hidden");
+    if (!panel.classList.contains("hidden")) $("as-input").focus();
+  });
+  $("as-send").addEventListener("click", asAsk);
+  $("as-input").addEventListener("keydown", (e) => { if (e.key === "Enter") asAsk(); });
+  // 后端标识（回放模式明示）
+  fetch("api/assistant/status").then((r) => r.json()).then((d) => {
+    const label = { EchoBackend: "回放模式（非真 LLM）", OpenAiCompatBackend: "LLM 直连", PiSidecarBackend: "pi-agent" }[d.backend] || d.backend;
+    $("as-backend").textContent = label;
+    $("sb-llm").textContent = `助手：${label}`;
+  }).catch(() => {});
+  // 工具切换时同步助手上下文
+  const nav = $("nav");
+  if (nav) nav.addEventListener("click", () => setTimeout(() => { As.currentTool = currentToolGetter(); }, 0));
+}

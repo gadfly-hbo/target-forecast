@@ -1,107 +1,99 @@
-# PRD — 测算工作台整合 P2：投放 ROI 测算工具（插件协议验证）
+# PRD — 测算工作台整合 P3：LLM 驱动（助手侧栏 + actions 声明 + 调参/解读闭环）
 
-规格源优先级：`.flow/proposal.md`（P2）> P0/P1 继承约束 > 本 PRD > 实现建议。红队：`.flow/red-team.md`（GO，K1-K5；K3 已确证）。
+规格源优先级：`.flow/proposal.md`（P3）> P0/P1/P2 继承约束 > 本 PRD > 实现建议。红队：`.flow/red-team.md`（GO，K1-K5）。
 
 ## Problem Statement
 
-工作台的插件协议（P0 设计、P1 加固）从未被第三个真实工具验证过。「新增测算工具不改底座一行代码」目前只是断言。需要一个真实业务工具——投放 ROI 测算——走通「引擎包 + plugin.py + static 前端 + 注册」全路径，暴露协议缺口（如有），并给用户一个可用的投放决策工具。
+工作台已有三个测算工具，但调参与解读依赖用户自己理解口径与参数：改一组增速要手动在 Inspector 里逐个输入，看结果后要自己判断「为什么保守情景差了」。用户最初的愿景是用 LLM 驱动工作台——用自然语言完成调参与解读。P0 已在插件 manifest 预留 `actions` 能力声明位，P3 是它首次落地。
 
 ## Solution
 
-新增 `roi_tool/` 包：纯函数测算引擎 + plugin.py 适配 + 单页前端，在 `workbench/server.py` 注册表登记（唯一允许的底座接触点）。工具回答：「每个投放计划预期赚不赚钱、ROI 多少、转化率至少要多少才保本、三档情景下结论稳不稳」。演示计划集内置合成数据（明确标注合成假设），无持久化、无导出端点、无数据导入。
+壳右侧新增可开合的**助手侧栏**：用户用自然语言说话，助手把意图转成对当前工具 API 的调用（tool calling），并用人话解读返回。三插件 manifest 补齐 `actions` JSON Schema；助手后端为**可插拔抽象层**，真身优先 pi-agent-core sidecar（与 deep-research 同栈），无 sidecar/key 时优雅降级（助手显示未配置说明，不影响工作台其他功能）。
 
 ## User Stories
 
-1. 作为投放决策者，我想输入每个计划的消耗/CPC/转化率/客单/毛利率/退款率，看到预期 ROI 与净贡献，以便判断计划值不值得投。
-2. 作为投放决策者，我想看到每个计划的盈亏平衡转化率，以便知道保底要求。
-3. 作为投放决策者，我想切换保守/基准/挑战三档情景，以便检验结论对假设的敏感度。
-4. 作为投放决策者，我想多计划并排比较并按净贡献排序，以便分配预算。
-5. 作为投放决策者，我想「不值得投」成为明确结论而非被算法回避，以便止损。
-6. 作为工作台使用者，我想壳导航自动出现「投放 ROI」并可深链 `?tool=roi`，以便与现有工具一致的进入方式。
-7. 作为工作台使用者，我想演示数据有明确的合成假设标注，以便不误用。
-8. 作为维护者，我想 P2 全程 `workbench/`、`target_forecast/`、`coupon_tool/` 零改动（K1 守护），以便验证插件协议完备。
-9. 作为维护者，我想存量测试中唯一被修改的断言是两工具集合断言（K3 授权），其余全部冻结，以便确认无回归。
-10. 作为维护者，我想 README 记录第三个工具的接入方式，以便未来第四个工具照做。
+1. 作为使用者，我想在壳右侧打开助手面板直接问「基准情景净贡献是多少」，得到带数字的人话回答，以便不学习 API 也能拿结果。
+2. 作为使用者，我想说「把挑战情景新客增速调到 25%」并让助手改 forecast 的参数，以便免手动找输入框。
+3. 作为使用者，我想对写操作有确认门（参数变更列表 + 我点确认才生效），以便 LLM 误调不直接落地。
+4. 作为使用者，我想问「为什么保守情景全渠道 GMV 下降」得到基于当前数据的解读，以便理解结论成因。
+5. 作为维护者，我想 actions 声明从 manifest 机械生成 LLM tool 定义，以便第四工具接入时助手自动会用它。
+6. 作为维护者，我想无 LLM key / 无 sidecar 时助手优雅降级而不是报错，以便工作台离线可用性不被破坏。
+7. 作为维护者，我想助手全链路有回放后端驱动的回归测试，以便 LLM 不确定性不摧毁测试纪律。
+8. 作为维护者，我想 key 配置走 env 或本地 gitignore 文件，以便凭证不进仓库。
 
 ## Implementation Decisions
 
-### D1 — 工具身份
+### D1 — 架构：助手后端抽象层 + sidecar 优先（diff 门核心，吸收红队 K1）
 
-- 包名 `roi_tool/`，tool_id `roi`，名称「投放 ROI」，icon 「📈」。注册进 `build_default_registry`。
+- `workbench/assistant/` 包：`backend.py` 定义后端协议（`chat(messages, tools) -> 回复+tool_calls`）；`tools.py` 从全插件 manifest 的 actions 生成 tool 定义；`service.py` 编排一轮「LLM 调用 → tool 执行（走 /t/{id}/api/ 内部直调或 HTTP）→ 结果回灌」。
+- **后端优先级**：`PiSidecarBackend`（HTTP 调本机 Node sidecar，sidecar 内用 pi-agent-core + pi-ai，复用 deep-research 的 provider 配置形态）→ `OpenAiCompatBackend`（stdlib urllib 直连 OpenAI 兼容 API）→ `EchoBackend`（回放/测试用，从预录响应驱动，**明确标注非真 LLM**）。
+- sidecar 代码放 `assistant-sidecar/`（独立 package.json，`@earendil-works/pi-agent-core`），Python 壳不 import 它、只代理；启动脚本在 node 可用时自动起 sidecar，不可用则降级。
+- **关键取舍（diff 门确认）**：此形态把 node 工具链接入本仓库。备选：纯 Python 直连形态（不引入 sidecar，pi-agent 留作未来后端）。
 
-### D2 — 引擎模型（基线，公式自解释）
+### D2 — actions 声明（diff 门确认粒度）
 
-每计划输入：`spend_cny`（消耗元）、`cpc_cny`（单次点击成本）、`cvr`（转化率 0-1）、`aov_cny`（客单价）、`gross_margin`（毛利率 0-1）、`refund_rate`（退款率 0-1）。
+每工具 2-3 个 action，JSON Schema 参数，语义对齐现有 API：
 
-```
-点击 clicks   = spend / cpc
-订单 orders   = clicks × cvr
-GMV           = orders × aov
-净毛利 net    = GMV × (1 − refund_rate) × gross_margin − spend
-ROI           = GMV / spend
-盈亏平衡 CVR* = spend ÷ (spend/cpc × aov × (1−refund) × margin)
-              = cpc × spend... 化简：CVR* = cpc / (aov × (1−refund_rate) × gross_margin)
-```
+- **forecast**：`get_state`（只读）；`calc`（提交情景参数 → 三视角结果，参数结构对齐 /api/calc）；`set_scenario_params`（调参意图 → 生成参数补丁，写操作）。
+- **coupon**：`get_state`；`compare`（scenario 全文测算）；`list_runs`（封存运行清单）。coupon 场景全文复杂，P3 只开放只读与「指定 scenario_id 重算」，不写场景。
+- **roi**：`get_state`；`calc`（plans+scenarios）；`set_plan_params`（单计划参数补丁，写操作）。
 
-- 情景（保守/基准/挑战）：对 `cvr` 与 `aov` 施加增速，其余参数平推；增速可配（默认 -20% / 0% / +20%）。
-- 输出（每计划×情景）：clicks/orders/GMV/net/ROI/CVR*/结论（net>0 投 / 边界 / 不投）。
-- 汇总：情景内合计 spend/GMV/net 与按 net 降序排名；跨情景结论稳定性（某计划在三档下结论是否一致）。
-- 参数校验：spend>0、cpc>0、0<cvr<1、aov>0、0≤margin<1、0≤refund<1；不合法 → 422 带原因（coupon 模式）。
-- 引擎为纯函数：`evaluate(plans, scenarios) -> result`，无 IO。
+写类 action（set_*）在助手侧栏渲染确认门：列出将变更的字段与新值，用户点击确认才执行（K4）。
 
-### D3 — 服务端与插件
+### D3 — 助手端点与壳前端
 
-- `roi_tool/server.py`：route_get/route_post 模式（复用 coupon/forecast 的结构惯例，代码独立书写）；`GET /api/state` 返回引擎版本、演示计划（若未自定义）、参数默认值、情景定义、`demo_used: true` 标记、`synthetic` 标注；`POST /api/calc` 接收 plans+scenario 调整 → evaluate → JSON；不合法输入 422。
-- `roi_tool/plugin.py`：`build_tool(root)`，无持久化目录需求（不建 workspace/roi/，K5）；handle_get/handle_post 绑定。
-- 无导出端点（无磁盘产物，P1 D4 约定）；无 runs 封存。
+- 壳新增 `POST /api/assistant/chat`：请求 {message, history, tool_id} → 响应 {reply, tool_calls:[{action, args, result_summary}], pending_confirmation?}。后端不可用时返回 503 + 配置说明文案。
+- 壳前端右侧助手面板（可开合，宽度 ~320px，Xanthil token）：消息列表、输入框、写操作确认卡。助手操作后若影响 iframe 内展示，通过 iframe reload（`frame.contentWindow.location.reload()`）刷新，**不做跨 iframe 状态桥**（K5）。
+- 助手上下文注入：当前工具 id + 该工具 /api/state 摘要（数值太大时只注入 totals/基线级摘要），控制 token。
 
-### D4 — 前端
+### D4 — key 与配置（吸收 K2；用户已确认：小米 MIMO，复用 ZCode 配置）
 
-单页（forecast 式，Xanthil token）：顶部情景切换（保守/基准/挑战）、主区计划结果表（spend/GMV/ROI/net/CVR*/结论 chip）、参数侧栏（每计划六参数可调，防抖重算）、演示标注常驻。无图表、无多视图（K5 守护）。API 全相对路径。
+**实测确认（ASSESS 探针，两 API 均 200）**：MIMO base `https://token-plan-cn.xiaomimimo.com/v1`，模型 `mimo-v2.6-pro`（1M 上下文，reasoning 模型，chat/completions 与 responses 两形态均可用）。ZCode key 位置：`~/.zcode/v2/provider_config.json` → `providerConfigRules.providerRules` 中 `providerName: 小米` 条目的 `config.access.apiKey`（本机可读）。
 
-### D5 — 「底座零改动」守护（K1/K3）
+- **key 解析优先级**：`workspace/assistant.env`（gitignored，用户手写覆盖）→ 读 `~/.zcode/v2/provider_config.json` 的小米条目 → env `WORKBENCH_LLM_API_KEY`/`BASE_URL`/`MODEL`。
+- sidecar 用 pi-ai 的 **openai-completions** API 形态（deep-research 同款适配路径，tool calling 走 chat/completions 的 tools 字段；MIMO 实测支持）。
+- 后端选择：自动探测（sidecar 可达 → sidecar；有 key → openai-compat 直连；否则 echo 回放）；可用 env `WORKBENCH_LLM_BACKEND` 强制。
+- 无 key 时助手面板显示配置指引（503 降级文案含路径说明）。
 
-- P2 全程 `workbench/`（除注册表登记一行）、`target_forecast/`、`coupon_tool/` 无行为改动；REVIEW 以 diff 复核。
-- 存量测试唯一允许修改：`test_default_registry_builds_all_tools` 的两条精确集合断言 → 更新为「forecast/coupon 必在且总数≥3、名称对应」（K3 授权，diff 门确认）。其余断言冻结。
+### D5 — 回放后端与测试
 
-### D6 — README
-
-底座章节补第三工具范例：新增工具三步（引擎包 → plugin.py → 注册表登记）+ roi 工具简介。
+- `EchoBackend` 从 `workbench/assistant/fixtures/` 预录响应（message → reply + tool_calls 脚本）驱动，测试用它走完整链路（意图→tool 执行→确认门→回复）。
+- 单测：tools 生成器（schema 完整、可序列化、与 manifest 对齐）、service 编排（一轮闭环、写操作确认门、后端降级 503）、各后端适配器（Echo 全链路；OpenAI 适配器 mock HTTP）。
+- 存量 145 项测试零断言修改。
 
 ## Testing Decisions
 
-- **主 seam：引擎纯函数**（tests/test_roi_engine.py）：黄金案例手工算定（一个正向计划、一个亏损计划、一个边界计划）；公式不变量（盈亏平衡 CVR* 下 net≈0）；情景单调性（挑战 net ≥ 基准 ≥ 保守）；校验 422 矩阵。
-- **HTTP seam**（tests/test_workbench.py 增补或 tests/test_roi_server.py）：壳内 /t/roi/api/state、POST calc 端到端、422 路径、未知路由 404、静态页服务。
-- **守护 seam**：底座零改动 diff 检查（REVIEW 复核 + 切片完成时人工 git diff --stat）；静态不变量（roi_tool/static 无根绝对 /api）。
-- **回归 seam**：全部存量测试（含 K3 授权的一处断言更新）绿。
+- **主 seam：service 编排纯函数**（tests/test_assistant_service.py）：Echo 后端注入 → 问「净贡献」→ 断言 tool_call 选对 action、结果数字进入回复；写操作 → 断言返回 pending_confirmation 且未执行；确认后执行并返回 summary。
+- **tools seam**（tests/test_assistant_tools.py）：三工具 actions 存在、JSON Schema 合法（必填/类型/枚举）、生成器输出可被 json 序列化。
+- **HTTP seam**（tests/test_workbench.py 增补）：/api/assistant/chat 端到端（Echo 后端下）、后端不可用 → 503 降级文案。
+- **回归 seam**：全部存量测试零断言修改。
 
 ## Out of Scope
 
-- LTV/复购归因、自然流量蚕食/增量测算、多触点模型（K2 显式排除）。
-- 真实广告平台数据接入与导入。
-- 持久化、运行封存、导出下载（无磁盘产物）。
-- actions 填充、LLM 接入（P3）。
-- forecast/coupon 的任何功能改动。
+- 自主多步测算 / agent 编排（P3 之后演进，P0 路线原文）。
+- 跨 iframe 状态感知、工具页内部状态桥（K5 kill criterion）。
+- coupon 场景全文写操作、真实数据源接入。
+- LLM 真身联调（key/sidecar 的实机验收列为用户侧；本 flow 交付回放后端 + 适配器 + 配置路径）。
 
 ## GRILL 决议（自我拷问，2026-09-27）
 
-约束：P2 proposal 与 P0/P1 继承决策不重新讨论；以下均为 PRD 未细化的开放点，按推荐自答，无升级项。
+约束：P3 proposal 与继承决策不重新讨论；以下均为 PRD 未细化开放点，按推荐自答，无升级项。
 
-**G1 — 演示计划集内容（4 个合成计划）**：① 天猫直通车（搜索，高 CVR 稳赚）② 抖音千川（信息流，量大利薄、情景敏感）③ 京东快车（中规中矩、基准情景边界）④ 小红书聚光（高客单低 CVR、基准情景亏损但挑战转正——展示「结论随假设翻转」）。参数为合成假设，全响应带 `synthetic: true` 标注。
+**G1 — sidecar provider 接线：** `assistant-sidecar/` 为最小 Node 服务（express 不引入，stdlib http 或 pi 生态惯例——实现期参照 deep-research `src/adapters/live.ts` 的 `runAgentLoop` + `getBuiltinModel` 用法）；自定义 provider 传 baseUrl+apiKey（openai-completions 形态），model 默认 `mimo-v2.6-pro`，可用 env/assistant.env 覆盖。sidecar 端口 8321。
 
-**G2 — 结论口径（引擎出事实，前端出 chip）**：引擎输出 net/ROI/cvr_star/gap（=cvr_star−cvr）与 `verdict`（net>0 → "净贡献为正"；否则 "净亏损"）+ `below_breakeven`（cvr<cvr_star）布尔。不做多档模糊评级（可投/观察/不投）——两档结论 + 事实字段足够，避免伪精确。
+**G2 — 写操作确认门协议：** 两步——助手响应可带 `pending_confirmation: {call_id, action, args, preview}`（preview=将变更的字段/值摘要），此时**不执行**；前端确认卡经第二次请求 `{confirm: call_id}` 才执行并返回最终 summary。只读 action 直接执行。call_id 一次性、与会话绑定。
 
-**G3 — 情景默认增速**：保守 −20% / 基准 0% / 挑战 +20%，作用于 cvr 与 aov，其余平推；前端可调三档各自的增速值（与 forecast Inspector 调参体验一致）。
+**G3 — 上下文注入裁剪：** 助手请求的 system 上下文只注入轻量摘要（工具名/平台清单/demo_used/默认参数），全量数值一律经 tool_call 现取，控制 token（reasoning 模型 prompt 费不可忽视）。
 
-**G4 — 引擎版本与契约**：`roi_tool/__init__.py` 暴露 `ENGINE_VERSION = "1.0"`；`/api/state` 返回 engine_version/演示 plans/参数默认值/情景定义/demo_used:true/synthetic 标注/boundary 本机运行声明（与 coupon state 契约同风格）。
+**G4 — 会话历史：** 存前端内存（刷新即新会话），无服务端持久化——本地单人工具，不做账号级会话（K5）。
 
-**G5 — demo_used 语义**：roi 无持久化，每次 calc 的 plans 来自请求体，/api/state 返回的 plans 恒为内置演示集——demo_used 恒 true、界面常驻「合成假设」标注，壳状态栏自动显示演示标记（D5 机制，零底座改动）。
+**G5 — sidecar 生命周期：** 壳 `serve` 时探测 `node` 与 sidecar 构建产物（`assistant-sidecar/dist/server.js`），可用则以子进程拉起、退出时回收；探测失败自动降级 openai-compat/echo，启动日志明示当前后端。启动脚本不变（壳统一负责）。
 
-**G6 — 前端参数编辑**：每计划六参数全部可编辑（number input，防抖 400ms 重算），情景切换即时重算；支持增删计划（最小实现：添加空白计划、删除行）——回答「多计划比较」故事的基本需要，不做计划模板/复制。
+**G6 — echo 回放 fixtures：** 3 个预录脚本——①解读类（问净贡献→get_state/calc→数字进入回复）②调参类（改增速→pending_confirmation→确认→summary）③越界类（要求改 coupon 场景→回复不支持并说明）。回放文件标注「合成响应，非 LLM 输出」。
 
-**G7 — K1 守护的操作化**：每个切片完成后 `git diff --stat <review_base> -- workbench/ target_forecast/ coupon_tool/` 必须为空（注册表一行除外），REVIEW 复核同一命令。
+**G7 — 工具执行路径：** 助手 service 在壳进程内直接调用插件 route 函数层不现实（需构造 handler），改为内部 HTTP 回环（urllib 打本壳 /t/{id}/api/ 端点，随机端口场景用壳实际端口）——与外部路径完全一致，行为无分叉。
 
 ## Further Notes
 
-- 若实现中暴露协议缺口（K1），处理顺序：停下 → 判断缺口 or 需求越界 → 缺口则补协议（显式记录于 PRD/history）→ 继续。
-- 演示计划集：3-4 个合成计划（如 天猫直通车/抖音千川/京东快车/小红书聚光 风格），参数为合成假设。
+- sidecar 的最小形态：一个 `chat` 端点，内部 runAgentLoop 带 tools（与 deep-research 的 LiveModelConfig 同构）；pi-ai provider 配置沿用用户已有习惯。
+- 若 diff 门改选纯 Python 形态，sidecar 目录与相关后端不建，D1 其余不变（抽象层本来就允许多后端）。
