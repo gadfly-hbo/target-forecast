@@ -21,6 +21,12 @@ if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/api/state"; then
   exit 0
 fi
 
+# 数据布局收编（P1）：旧 data/ coupon_data/ output/ 无损迁移到 workspace/（幂等，冲突跳过不覆盖）
+if [ -d data ] || [ -d coupon_data ] || [ -d output ]; then
+  echo "[迁移] 收编存量数据到 workspace/ …"
+  .venv/bin/python -m workbench migrate || echo "[警告] 迁移未完成（见上方错误），服务仍启动；可手动运行: .venv/bin/python -m workbench migrate"
+fi
+
 # 端口被其他进程占用时自动换空闲端口(可用 PORT=xxxx 覆盖)
 if ! .venv/bin/python -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',$PORT))" 2>/dev/null; then
   echo "[端口] $PORT 已被其他进程占用,自动更换…"

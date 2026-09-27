@@ -1,70 +1,45 @@
-# Proposal — 测算工作台整合（统一底座）
+# Proposal — 测算工作台整合 P1：数据收编 + 统一导出 + 状态栏与设计语言
 
-来源：2026-09-27 会话讨论稿，用户认可方向后启动 dev-flow（gated）。本文件为后续所有阶段的最高规格源。
+来源：2026-09-27 会话，用户指示「按规划进入 P1」。本文件为 P1 flow 的最高规格源。P0 交付事实见 `.flow/archive/workbench-p0/`，P0 规划（含 P1 定义）以引用方式继承。
 
-## 用户原始需求（逐字要点）
+## 继承的 P1 定义（来自 P0 proposal 的分期路线，不可推翻）
 
-- 现仓库中「目标测算」和「优惠券测算」是两个独立工具，要整合到一个工作台。
-- 未来还会有其他测算工具增加（如投放 ROI 测算），**不可能每个测算工具都做一套底座**，要打通成一套底座。
-- 未来还要引入 pi agent sdk + LLM，用 LLM 驱动测算工作台。
-- 用户确认：「认可这个方向，直接走 dev-flow」——即认可下方整合规划，本 flow 执行其中的 P0。
+> P1：统一数据目录布局、统一导出下载、统一状态栏与设计语言（壳 UI 按全局 DESIGN.md 基线）。
 
-## 现状（代码事实）
+以及 P0 proposal 中已确认的架构决策（对 P1 有约束力的）：插件协议（Tool Contract）、单端口壳、`/t/{tool_id}/` 前缀、引擎不动、壳职责清单边界（红队 K5 / G7：底座不做当前工具不用的功能）。
 
-- 两工具技术形态一致：标准库 `http.server` + 无框架静态前端（index.html/app.js/style.css）+ JSON API + CLI；端口 8300 / 8310 各自独立。
-- 测算引擎均为不依赖 HTTP 层的纯 Python 模块（target_forecast/engine.py 等、coupon_tool 的 simulate/compare/stress_test 等）。
-- 重复部分：HTTP 骨架、静态页服务、端口/启动脚本（两个 .command）、演示播种、模板/导出下载。
-- 数据布局不同：目标测算用 `data/` + `output/`；优惠券用 `coupon_data/` + `output/coupon`。
-- 存量测试：tests/ 下目标测算 + 优惠券共 98+ 项，全部绿色（VERIFY 基线命令 `.venv/bin/python -m pytest tests -q`）。
+## 用户原始需求（本次会话逐字要点）
 
-## 已确认的整合规划（方向性决策，后续阶段不得推翻）
+「按规划进入 P1」——即执行上述继承的 P1 定义，无新增需求、无范围变更声明。
 
-### 架构目标
+## 本 flow（P1）范围
 
-```
-┌─ 启动测算工作台.command（唯一入口，一个端口 8300）
-└─ workbench/                    ← 底座（所有工具共用）
-   ├── shell server              标准库 http.server，工具注册表 + 路由分发
-   ├── shell frontend            壳页面：左侧工具导航 + 工具挂载区 + 全局状态栏
-   ├── shared services           端口回退 / 演示播种 / 模板与导出下载 / 健康检查
-   └── tool contract             插件协议
-├─ tools/target_forecast/        ← 现有包迁移为插件（引擎不动）
-├─ tools/coupon_tool/            ← 同上
-└─ tools/roi_tool/               ← 未来新工具：只写引擎 + manifest
-```
+### 1. 统一数据目录布局
 
-### 插件协议（Tool Contract）
+- 目标布局 `workspace/{tool_id}/`：目标测算（forecast）收编 `data/`（orders/、metrics/）与 `output/`（报表 + 中间指标）；优惠券（coupon）收编 `coupon_data/` 与 `output/coupon`。
+- 本地存量数据**无损迁移**：迁移脚本或启动时自动搬迁，旧目录不残留歧义（迁走后删除空壳或明确弃用标记）。
+- `templates/` 两工具共用，位置不变。
+- 双机（macmini/MacBook）各自本地执行迁移；数据不入 git 的现状不变（workspace/ 加入 .gitignore）。
 
-每个工具一个包，入口暴露描述对象：id（URL 前缀 /api/{tool_id}/...）、name、icon、static 目录、register_routes、seed_demo（可选）、actions（机器可读 action 清单，为 LLM 预留，先空）。壳服务只做：按 id 分发 API、托管 /tools/{tool_id}/ 静态资源、渲染带导航的壳页面。工具前端仍是各自的 index.html/app.js，从整页应用变为壳内页签。
+### 2. 统一导出下载通道
 
-### 为 LLM 驱动的预留（现在只留接口，不实现）
+- 现状：优惠券有 `/api/export/{run_id}/{kind}` 四格式导出（workspace 收编后路径调整）；目标测算的 Excel 报表与 CSV 中间指标目前无 API 下载通道（`main.py run` 直接写盘）。
+- P1：为两工具建立统一的导出约定（每工具暴露导出清单 + 下载端点，壳层提供统一入口/约定，不在壳里重做各工具导出逻辑）。
 
-1. 单一 API 网关 = 单一 LLM 工具面：LLM 未来调用的就是前端用的同一套 JSON API。
-2. manifest 的 `actions` 字段（JSON Schema）作为未来 function-calling 的 tool 定义来源，P1 先留空占位。
-3. 引擎纯函数化已是事实，LLM 编排层可进程内直调引擎。
-4. 运行封存与可追溯提升为底座级约定（LLM 测算必须可回放、可审计）。
+### 3. 统一状态栏与全局设计语言
 
-### 分期路线
+- 壳状态栏：当前数据源（演示/正式标记）、最近测算时间等跨工具通用信息的展示约定与壳 UI 落位。
+- 壳 UI 按全局 `~/.zcode/design/DESIGN.md`（JuanerAI Xanthil）基线精修（P0 已用其 token 做了初版壳，P1 完整对齐）。
 
-- **P0（本 flow）**：抽底座 workbench/（壳服务 + 注册表 + 壳前端 + 统一启动脚本）；两工具迁移为插件（URL 加前缀）；旧 .command 保留为薄壳或替换为单一入口；存量测试全部保持绿色。验收：一个端口、一次双击，两个工具都能用。
-- P1：统一数据目录布局、统一导出下载、统一状态栏与设计语言（壳 UI 按全局 DESIGN.md 基线）。
-- P2：投放 ROI 测算验证插件协议（新工具不改底座一行代码）。
-- P3：引入 pi agent sdk + LLM（助手侧栏、补 actions 声明、先自然语言调参+解读闭环）。
+## 范围边界
 
-### 风险与取舍（已确认）
+做：上述三项 + 存量数据无损迁移 + 测试保持绿色 + README 更新。
+不做：P2（ROI 工具）、P3（LLM/pi agent sdk、actions 填充）、引擎与口径任何改动、工具前端业务交互改版。
 
-- 前端整合深度：壳 + 工具自治前端，不强行合并单页应用；视觉统一靠共享 CSS token。
-- URL 变更：旧书签/脚本里的 8300/8310 路由失效，启动脚本做兼容提示；本地工具影响小。
-- 不过度设计：底座只做当前两工具真实需要的能力，actions/热加载只留接口不实现。
+## 开放问题（留给 GRILL/PRD）
 
-## 本 flow（P0）范围边界
-
-做：workbench 壳、插件协议、两工具迁移、统一启动入口、测试保持绿色。
-不做：P1 数据目录收编（除非迁移必需的最小调整）、ROI 工具、LLM 接入、actions 内容填充、引擎任何改动。
-
-## 开放问题（留给 GRILL/实现期）
-
-- 壳前端形态：iframe 隔离 vs 直接挂载工具 DOM。
-- 旧 .command 脚本：保留薄壳转发 vs 直接替换为单一 `启动测算工作台.command`。
-- 工具包是否物理移动到 tools/ 目录，还是保持现有顶层包名（target_forecast/、coupon_tool/）仅注册为插件。
-- 壳导航与全局状态栏的最小 UI 范围（P0 做到什么程度）。
+- workspace 迁移时机：启动时自动迁移 vs 一次性迁移脚本 vs 两者结合；迁移冲突（新旧目录同时有数据）的处理策略。
+- 统一导出的具体形态：壳级聚合端点（/api/exports 跨工具清单）vs 仅统一每工具的导出端点约定。
+- 状态栏信息的来源：壳主动聚合各工具状态（需插件协议加接口）vs 壳仅提供展示位、内容由各工具上报。
+- .gitignore 与启动脚本、README 的配套改动范围。
+- P0 审查遗留的 5 条非阻断建议是否顺手处理（默认：不属于 P1 范围，除非与用户确认）。

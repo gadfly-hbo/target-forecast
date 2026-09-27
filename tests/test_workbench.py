@@ -212,6 +212,56 @@ def test_forecast_static_no_root_absolute_api():
         assert not re.search(r"""["']/api""", text), f"{js.name} 含根绝对 API 路径"
 
 
+# ---------- 切片 3：forecast 导出下载 ----------
+
+
+def test_forecast_export_report(forecast_shell_url):
+    status, body = _get(forecast_shell_url + "/t/forecast/api/export/report")
+    assert status == 200
+    assert body[:2] == b"PK"  # xlsx 魔数
+    assert len(body) > 1000
+
+
+def test_forecast_export_metrics(forecast_shell_url):
+    """中文平台名必须 percent-encode（前端 encodeURIComponent，GRILL G5）。"""
+    status, body = _get(forecast_shell_url + "/t/forecast/api/export/metrics/%E5%A4%A9%E7%8C%AB")
+    assert status == 200
+    text = body.decode("utf-8-sig")
+    assert "month" in text.splitlines()[0]
+
+
+def test_forecast_export_missing_404(forecast_shell_url):
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _get(forecast_shell_url + "/t/forecast/api/export/metrics/%E4%B8%8D%E5%AD%98%E5%9C%A8")
+    assert ei.value.code == 404
+    assert "main.py run" in ei.value.read().decode()
+
+
+def test_forecast_export_path_traversal_blocked(forecast_shell_url):
+    """%2F 编码绕斜杠过滤的路径穿越必须 404（review round 1）。"""
+    for payload in ("..%2F..%2Fconfig", "%2Fetc%2Fpasswd", "..%5C..%5Cconfig"):
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _get(forecast_shell_url + f"/t/forecast/api/export/metrics/{payload}")
+        assert ei.value.code == 404, payload
+
+
+def test_forecast_export_ui_entry():
+    """review round 1/2 blocker：导出端点必须有可达的前端入口（US5/G5）。
+
+    对应性校验：index.html 里每个 data-pane 页签都必须在 app.js 的
+    切换逻辑中出现（round 2 抓到的假证据：只断言字符串存在，漏了切换漏接）。
+    """
+    import re
+
+    html = (ROOT / "target_forecast" / "static" / "index.html").read_text(encoding="utf-8")
+    js = (ROOT / "target_forecast" / "static" / "app.js").read_text(encoding="utf-8")
+    panes = re.findall(r'data-pane="([^"]+)"', html)
+    assert len(panes) >= 3 and "exports-pane" in panes
+    for pane in panes:
+        assert f'"{pane}"' in js, f"页签 {pane} 未接入切换逻辑"
+    assert "api/export/report" in js and "encodeURIComponent" in js
+
+
 # ---------- 切片 4：壳导航前端 ----------
 
 
@@ -229,6 +279,23 @@ def test_shell_static_assets(base_url):
     assert status == 200 and "#f7f6f3" in css.decode()  # Xanthil 底 token
     status, js = _get(base_url + "/app.js")
     assert status == 200 and "tool" in js.decode()
+
+
+def test_shell_statusbar(base_url):
+    """状态栏（PRD D5）：产品名+版本、当前工具位、演示数据标记位、本机声明。"""
+    _, html = _get(base_url + "/")
+    text = html.decode()
+    assert 'id="statusbar"' in text
+    assert 'id="sb-tool"' in text and 'id="sb-demo"' in text
+    assert "本机" in text
+    _, js = _get(base_url + "/app.js")
+    assert "demo_used" in js.decode()  # 数据源标记来自工具现有 /api/state（D5）
+
+
+def test_shell_statusbar_xanthil_tokens(base_url):
+    _, css = _get(base_url + "/style.css")
+    text = css.decode()
+    assert ".statusbar" in text and "#f0efec" in text  # surface-2 底
 
 
 def test_default_registry_builds_all_tools():

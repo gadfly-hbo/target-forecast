@@ -44,7 +44,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 class Workbench:
     """线程安全的工作台上下文：Store + 导出目录。"""
 
-    def __init__(self, data_dir: str = "coupon_data", out_dir: str = "output/coupon",
+    def __init__(self, data_dir: str = "workspace/coupon", out_dir: str = "workspace/coupon/output",
                  templates_dir: str = "templates"):
         self.data_dir = data_dir
         self.out_dir = out_dir
@@ -300,7 +300,7 @@ def make_handler(app: Workbench):
     return Handler
 
 
-def serve(port: int = 8310, data_dir: str = "coupon_data"):
+def serve(port: int = 8310, data_dir: str = "workspace/coupon"):
     app = Workbench(data_dir=data_dir)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
     print(f"优惠券测算工作台：http://127.0.0.1:{port}（数据目录 {data_dir}，本机运行）")

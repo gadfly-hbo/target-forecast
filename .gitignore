@@ -4,12 +4,9 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# 数据与产出不入库：
-# data/ 下是演示数据或真实业务数据（订单明细敏感，切勿提交）
-# output/ 由 main.py run 重新生成
-data/
-output/
+# 数据与产出入库边界：
+# workspace/ 下是演示数据或真实业务数据（订单明细敏感，切勿提交），报表由 main.py run 重新生成
+workspace/
 
-# 优惠券测算工具（coupon_tool）运行时数据与本地 flow 状态
-coupon_data/
+# 本地 flow 状态
 .flow/state.json

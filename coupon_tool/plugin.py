@@ -13,8 +13,8 @@ from . import server
 
 def build_tool(root: Path) -> dict:
     root = Path(root).resolve()
-    app = server.Workbench(data_dir=str(root / "coupon_data"),
-                           out_dir=str(root / "output" / "coupon"),
+    app = server.Workbench(data_dir=str(root / "workspace" / "coupon"),
+                           out_dir=str(root / "workspace" / "coupon" / "output"),
                            templates_dir=str(root / "templates"))
 
     def handle_get(h, path):

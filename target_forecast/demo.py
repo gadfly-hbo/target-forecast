@@ -48,7 +48,7 @@ def _gen_skus(rng, n=100, extra_new=12):
 
 
 def gen_detail(root: Path) -> None:
-    out_dir = root / "data" / "orders"
+    out_dir = root / "workspace" / "forecast" / "orders"
     out_dir.mkdir(parents=True, exist_ok=True)
     months = _month_range("2024-04", "2026-09")
 
@@ -101,7 +101,7 @@ def gen_detail(root: Path) -> None:
 
 
 def gen_agg(root: Path) -> None:
-    out_dir = root / "data" / "metrics"
+    out_dir = root / "workspace" / "forecast" / "metrics"
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(7)
     rows = []
@@ -124,6 +124,6 @@ def gen_agg(root: Path) -> None:
 
 
 def generate(root: Path) -> None:
-    print("生成演示数据（data/orders/*.xlsx 模式A + data/metrics/*.xlsx 模式B）…")
+    print("生成演示数据（workspace/forecast/orders/*.xlsx 模式A + workspace/forecast/metrics/*.xlsx 模式B）…")
     gen_detail(root)
     gen_agg(root)

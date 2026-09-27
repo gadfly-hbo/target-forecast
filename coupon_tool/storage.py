@@ -28,9 +28,9 @@ def _now_iso() -> str:
 
 
 class Store:
-    """coupon_data/ 下的 JSON 文件存储。"""
+    """workspace/coupon/ 下的 JSON 文件存储。"""
 
-    def __init__(self, root: str = "coupon_data"):
+    def __init__(self, root: str = "workspace/coupon"):
         self.root = root
         for sub in ("scenarios", "runs", "reviews", "decisions", "profiles"):
             os.makedirs(os.path.join(root, sub), exist_ok=True)

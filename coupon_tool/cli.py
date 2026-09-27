@@ -36,13 +36,13 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_demo = sub.add_parser("demo", help="内置合成演示场景端到端（非真实经营数据）")
-    p_demo.add_argument("--data-dir", default="coupon_data")
-    p_demo.add_argument("--out", default="output/coupon")
+    p_demo.add_argument("--data-dir", default="workspace/coupon")
+    p_demo.add_argument("--out", default="workspace/coupon/output")
 
     p_console = sub.add_parser("console", help="从数据目录加载已保存场景测算")
     p_console.add_argument("--scenario", required=True)
-    p_console.add_argument("--data-dir", default="coupon_data")
-    p_console.add_argument("--out", default="output/coupon")
+    p_console.add_argument("--data-dir", default="workspace/coupon")
+    p_console.add_argument("--out", default="workspace/coupon/output")
     p_console.add_argument("--no-stress", action="store_true")
 
     p_tpl = sub.add_parser("templates", help="生成导入模板（分桶/订单明细 XLSX）")
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_serve = sub.add_parser("serve", help="启动本地工作台（默认 8310 端口）")
     p_serve.add_argument("--port", type=int, default=8310)
-    p_serve.add_argument("--data-dir", default="coupon_data")
+    p_serve.add_argument("--data-dir", default="workspace/coupon")
 
     args = parser.parse_args(argv)
     try:

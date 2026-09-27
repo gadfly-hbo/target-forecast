@@ -1,53 +1,54 @@
-# Red-Team: 测算工作台整合 P0 — 抽共享底座，两工具插件化（引擎不动，单端口单入口）
+# Red-Team: 测算工作台 P1 — 数据收编 workspace/ + 统一导出 + 状态栏与设计语言
 
 ## Top Kill-Assumptions (ranked)
 
-### K1 —「URL 加前缀即可迁移」是便宜的
-- **Claim:** 两工具前端/服务端可以通过加 `/t/{id}/` 前缀搬进壳里，引擎不动、前端只改少量路径。
-- **Steelman:** 前端 fetch 点极少且集中（target 3 处 fetch；coupon 一个 api() 帮助函数收敛全部 POST，另有 8 处导出 `<a href>`），服务端路由是扁平的精确匹配表，剥离前缀后可直接复用现有匹配逻辑。
-- **Fails if:** 前端或服务端存在未被发现的路径/引用假设（如导出下载链接是根绝对路径、iframe/挂载后相对路径解析错乱、静态资源缓存键冲突），迁移变成逐行排雷。
-- **Evidence（已取）:** `grep` 证实：两前端全部 API 调用点已枚举（target_forecast/static/app.js:36,49,416；coupon_tool/static/app.js:15 单一 api() + :378-381,414-417 导出链接）；两服务端均为扁平 `self.path` 匹配（target_forecast/server.py:186-203；coupon_tool/server.py:90-245）。coupon 的 api() 帮助函数意味着加 base 前缀是一处改动；导出链接是字符串模板，同样集中。
-- **Kill criterion:** 迁移中发现任何工具的前端路径调用点超过已枚举集合，或服务端路由依赖第三方不可控重定向 → 停下重新评估迁移策略。
-- **Cheapest test:** P0 第一个切片就做「coupon api() 加 base + 壳内冒烟」，一天内见分晓。
+### K1 —「无损迁移」在两台机器上都可安全自动执行
+- **Claim:** data/ 与 coupon_data/ 的存量内容可以自动搬到 workspace/{forecast,coupon}/，用户无感、不丢数据。
+- **Steelman:** 路径面已枚举且极小（main.py / demo.py / templates.py / 两 server.py / 两 plugin.py / storage.py / exports.py / 启动脚本 / .gitignore）；移动文件本身可逆（先复制后删旧），冲突可检测。
+- **Fails if:** 两台机器（macmini/MacBook）各自数据有差异（真实业务数据两端各自维护——P0 launcher 注释明确「data/ 数据不入库，两端各自维护」），迁移脚本在两端行为不一致，或一端数据被另一端模式覆盖；或用户在迁移中途打开了正在运行的服务，读到一半的旧路径。
+- **Evidence（已取）:** 本机 data/（orders/、metrics/）与 coupon_data/（scenarios/runs/decisions/reviews/profiles）均有真实内容；output/ 有生成的报告与中间指标。.gitignore 忽略 data/、output/、coupon_data/——git 里没有任何数据，迁移不能靠版本控制回滚。
+- **Kill criterion:** 迁移逻辑出现「复制后删除源」且无法 dry-run / 无法冲突提示 → 停止，改为显式迁移脚本 + 人工确认。
+- **Cheapest test:** 迁移函数写成纯函数（给定源/目标目录返回操作计划），先用 tmp 目录单测，再对真实目录执行。
 
-### K2 — 单壳进程能同时承载两工具且无状态互串
-- **Claim:** 标准库 ThreadingHTTPServer 单进程托管两个工具（各自有 WorkbenchState/Workbench 上下文与锁）不会互相干扰。
-- **Steelman:** 两工具现有 server 都已经是 ThreadingHTTPServer + 各自锁保护的上下文，无共享全局态；壳只是把两个 handler 的路由表挂到同一进程。
-- **Fails if:** 任一工具的 handler 依赖「自己拥有整个 path 命名空间」之外的隐式单例（如模块级缓存、cwd 相对路径在 shell 启动目录变化后失效）。
-- **Evidence（已取）:** coupon Workbench 用构造参数 data_dir/out_dir/templates_dir（相对路径，cwd 敏感）；target WorkbenchState 用 root: Path。壳启动时若 cwd 不同，相对路径会失效——已识别，需在插件注册时显式传绝对路径。
-- **Kill criterion:** 壳内某工具的数据目录读写落到错误位置（演示播种写到壳目录而非仓库根）→ 修插件上下文构造。
-- **Cheapest test:** 壳起服务后调两工具的 /api/state，再从仓库根外另一目录启动复测一次。
+### K2 — 收编后「引擎不动、存量测试零断言修改」仍成立
+- **Claim:** 数据目录改到 workspace/ 后，113 项测试仍然全绿、断言零修改。
+- **Steelman:** 测试的数据目录全部参数化（test_coupon_server.py 用 tmp_path_factory；test_server.py 用 WorkbenchState(ROOT) 但 data/ 收编后 ROOT 下无 data——这是真实断点）；引擎读的是构造参数，不是硬编码路径。
+- **Fails if:** target_forecast 的 demo 生成、模板生成、report 输出路径与 data/ 收编纠缠（demo.generate(ROOT) 写 data/orders，report 写 output/），一处漏改导致 demo 数据写到旧位置被「空目录自动生成演示数据」逻辑反复触发。
+- **Evidence（已取）:** test_server.py 的 fixture 直接 `server.WorkbenchState(ROOT, ...)`，其 load() 在 root/data 为空时自动生成演示数据到 root/data——收编后 ROOT/data 不存在，必须在 fixture 或 WorkbenchState 参数上调整（属于测试设施改动，非断言改动，PRD 需明示允许）。
+- **Kill criterion:** 任何业务断言需要修改才能过 → 迁移破坏了行为，回退该改动。
+- **Cheapest test:** 收编切片完成后立即全量 pytest（4-7 秒，成本极低）。
 
-### K3 —「存量测试保持绿色」与「入口变更」不冲突
-- **Claim:** P0 结束后 `.venv/bin/python -m pytest tests -q`（98+ 项）不修改断言仍全绿。
-- **Steelman:** tests/test_server.py 与 tests/test_coupon_server.py 打的是两工具各自的独立 server 入口；只要旧入口（`main.py serve`、`python -m coupon_tool serve`）保留可用，存量测试零改动。
-- **Fails if:** 为了插件化把服务端路由代码大改，导致旧入口行为漂移；或测试依赖端口/路径假设被壳占用。
-- **Kill criterion:** 任何存量测试需要改断言才能过 → 视为迁移破坏，回退该改动而不是改测试。
-- **Cheapest test:** 每个迁移切片后跑全量 pytest（4 秒内，成本极低）。
+### K3 — 统一导出通道有真实第二用户（forecast 的报表下载）
+- **Claim:** 统一导出约定值得建：forecast 的 Excel/CSV 产出现在无下载通道，P1 补上后用户会在工作台里下载。
+- **Steelman:** 现状 output/目标测算报告.xlsx 只能去 Finder 找；工作台内直接下载是明显体验增益；coupon 已有成熟导出模式可参照。
+- **Fails if:** forecast 的报表生成只在 CLI run 路径（main.py run），serve 路径从不生成文件——为下载通道要在 serve 路径新增「生成报表」能力，这超出「统一导出」变成「新增功能」，违背不过度设计。
+- **Evidence（已取）:** report.py 由 main.py run 调用；server.py serve 路径只有 /api/calc JSON，从不写 Excel。即 forecast 当前在壳内根本没有可下载的产物。
+- **Kill criterion:** 统一导出需要为 forecast 新增报表生成逻辑 → 收缩范围：P1 只统一 coupon 现有导出 + forecast 已有磁盘产物（若有）的下载，forecast serve 内生成报表推到 P2 之后单独评估。
+- **Cheapest test:** PRD 阶段逐条列出「导出通道服务的产物清单」，凡清单外的一律不做。
 
-### K4 — 壳 + 工具自治前端 够用，不会被「未来 LLM 驱动」推翻
-- **Claim:** iframe/页签式壳与 per-tool API 前缀，不会成为 P3 pi agent sdk 接入时的架构债。
-- **Steelman:** LLM 走的是 JSON API 层（manifest actions），不碰前端 DOM；壳前端形态与 LLM 能力正交。
-- **Fails if:** P3 需要跨工具编排 UI 状态（如 LLM 把目标测算的基线参数直接填进优惠券场景），而工具前端完全自治导致无桥接点。
-- **Kill criterion:** P3 设计时发现必须穿透工具前端内部状态才能编排 → 届时在 manifest 里补 UI-bridge 接口（P0 不为此设计）。
-- **Cheapest test:** P0 只保证 manifest 有 actions 占位字段与单一 API 前缀规范——这两个预留足以支撑 P3 起步，无需更多。
+### K4 — 状态栏需要壳级聚合而非展示位
+- **Claim:** 统一状态栏要做跨工具状态聚合（数据源、演示/正式、最近测算时间）。
+- **Steelman:** 壳 /api/state 已有工具清单；各工具 /api/state 已含 demo_used/coupon scenarios——聚合成本低。
+- **Fails if:** 「最近测算时间」等状态需要插件协议新增接口（actions 之外再加 status 上报），而各工具状态语义不同（forecast 的 calc 在内存、coupon 的 run 落盘），聚合层要为两个工具各写适配——底座再次长出工具特定代码，违背 K5/G7 教训。
+- **Kill criterion:** 状态栏信息无法从工具现有 /api/state 响应直接得到 → 该信息不进 P1 状态栏。
+- **Cheapest test:** 列出状态栏字段清单，逐字段标注来源端点已存在/需新增。
 
-### K5 — 底座抽象不超 speculative
-- **Claim:** 从两个工具抽出的共性（路由分发、静态托管、导航壳、启动脚本）是真实共性，不是为假想第三个工具过度设计。
-- **Fails if:** 抽到一半发现两工具的「共性服务」其实差异很大（如 coupon 的导出下载 vs target 没有下载），底座被迫长出一套只有一方用的抽象。
-- **Kill criterion:** 底座出现任何「当前两个工具都不用、只为未来准备」的函数/端点 → 删除。
-- **Cheapest test:** PRD 阶段逐条核对底座职责清单，每条标注「哪个现有工具在用」。
+### K5 — 设计语言精修范围可控
+- **Claim:** 壳 UI 对全局 DESIGN.md「完整对齐」是小改动。
+- **Steelman:** P0 壳已用 Xanthil token（底色/侧栏/圆角），diff 应集中在状态栏与细节密度。
+- **Fails if:** 「完整对齐」被解释为逐 token 审计 + 全套组件（命令面板/Inspector/语义色对），P1 范围爆炸。
+- **Kill criterion:** 设计语言切片出现与「侧栏 + 状态栏 + 内容区」无关的组件工作 → 砍。
+- **Cheapest test:** 设计切片只列 P1 新增/修改的具体 token 与组件清单。
 
 ## What's Well-Reasoned
 
-- **引擎不动**的决策有硬依据：两引擎已是纯函数包，coupon 有 98 项验收测试锁定行为，迁移不碰引擎是低风险拆分的核心。
-- **分期路线**（P0 底座 → P2 用 ROI 工具验证协议 → P3 LLM）把最不确定的 LLM 集成放在协议被真实第三个工具验证之后，顺序正确。
-- **预留 actions 字段但不实现**：符合「现在只留接口」的不过度设计原则。
-- 数据目录收编推到 P1 是对的——P0 强行统一 cwd 敏感的路径会放大 K2 风险。
+- 数据收编方向正确：workspace/{tool_id}/ 消除顶层 data/ 与 coupon_data/ 的散落，与 P0 插件协议的 root 约定自然衔接（plugin 构造时已有 root 参数）。
+- 迁移路径面极小且已枚举，K1/K2 的成本边界清晰，风险主要在「自动迁移的行为定义」而非「改哪里」。
+- 不动引擎、不动口径的边界继承自 P0，继续有效。
 
 ## What I Couldn't Assess
 
-- pi agent sdk 的实际接口形态（未见其文档），LLM 预留是否充分只能在 P3 验证；P0 的 actions 占位是最低成本的 hedge。
-- 壳前端用 iframe 还是 DOM 挂载对「双击 .command 本地工具」场景的体感差异（iframe 内工具的状态栏/全屏交互），留给 GRILL 决策，两种方案都不影响 API 层。
+- MacBook 端 data/ 与 coupon_data/ 的实际内容（只能本机验证迁移；需靠 fail-closed 迁移逻辑 + 双端各自执行保证安全）。
+- 用户对 forecast serve 内生成报表的真实需求强度（K3 的方向选择影响范围，留给 GRILL 推荐）。
 
-**Verdict: GO** — 无已满足 kill criterion 的假设；K1/K2 的证据已在红队阶段用 grep 直接取到，迁移成本边界清晰。
+**Verdict: GO** — 无已满足 kill criterion 的假设；K1-K5 均给出可执行的 kill criterion 与最便宜测试，PRD 可直接吸收。

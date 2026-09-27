@@ -170,7 +170,7 @@ def export_markdown(run: dict, path: str, decision: dict | None = None) -> str:
     return path
 
 
-def export_all(run: dict, out_dir: str = "output/coupon", decision: dict | None = None) -> dict:
+def export_all(run: dict, out_dir: str = "workspace/coupon/output", decision: dict | None = None) -> dict:
     os.makedirs(out_dir, exist_ok=True)
     rid = run["run_id"]
     paths = {

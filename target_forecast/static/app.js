@@ -41,6 +41,7 @@ async function boot() {
   buildSeg();
   buildParamsPane();
   buildCaliberPane();
+  buildExportsPane();
   bindEvents();
   await recalc();
 }
@@ -145,6 +146,17 @@ function onTierInput(inp) {
   debounceTimer = setTimeout(recalc, 400);
 }
 
+function buildExportsPane() {
+  const plats = Object.keys(S.stateInfo.platforms);
+  $("#exports-pane").innerHTML = `
+    <p class="meta">下载最近一次 <code>main.py run</code> 生成的产物；文件不存在时会提示先运行生成。</p>
+    <p><a href="api/export/report" download>📊 目标测算报告.xlsx</a></p>
+    <p class="meta">中间月度指标（CSV）：</p>
+    <ul class="caliber-list">
+      ${plats.map((p) => `<li><a href="api/export/metrics/${encodeURIComponent(p)}" download>${esc(p)} · 月度指标.csv</a></li>`).join("")}
+    </ul>`;
+}
+
 function buildCaliberPane() {
   const c = S.stateInfo.caliber;
   $("#caliber-pane").innerHTML = `
@@ -170,7 +182,7 @@ function render() {
   sbMode.textContent = S.stateInfo.demo_used ? "演示数据 DEMO" : "正式数据";
   sbMode.className = "chip " + (S.stateInfo.demo_used ? "warn" : "ok");
   const nOrders = Object.entries(S.stateInfo.platforms).filter(([, v]) => v.mode === "A").length;
-  $("#sb-src").textContent = `data/ · ${Object.keys(S.stateInfo.platforms).length} 平台（明细${nOrders} · 聚合${Object.keys(S.stateInfo.platforms).length - nOrders}）`;
+  $("#sb-src").textContent = `workspace/forecast/ · ${Object.keys(S.stateInfo.platforms).length} 平台（明细${nOrders} · 聚合${Object.keys(S.stateInfo.platforms).length - nOrders}）`;
   renderBanner();
   renderKpis();
   renderChart();
@@ -411,6 +423,7 @@ function bindEvents() {
     document.querySelectorAll(".insp-tabs button").forEach((b) => b.classList.toggle("active", b === btn));
     $("#params-pane").hidden = btn.dataset.pane !== "params-pane";
     $("#caliber-pane").hidden = btn.dataset.pane !== "caliber-pane";
+    $("#exports-pane").hidden = btn.dataset.pane !== "exports-pane";
   });
   $("#reload").addEventListener("click", async () => {
     S.stateInfo = await (await fetch("api/state?reload=1")).json();
@@ -420,7 +433,7 @@ function bindEvents() {
     buildParamsPane();
     buildCaliberPane();
     await recalc();
-    toast("已重新载入 data/ 数据");
+    toast("已重新载入 workspace/forecast/ 数据");
   });
 }
 

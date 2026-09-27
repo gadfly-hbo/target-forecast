@@ -30,7 +30,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 .venv/bin/python -m workbench serve  # 启动测算工作台（http://127.0.0.1:8300，左侧导航切工具）
 .venv/bin/python main.py demo        # 目标测算：生成演示数据并跑通全流程（先看这个）
-.venv/bin/python main.py run         # 目标测算：用 data/ 下的正式数据测算
+.venv/bin/python main.py run         # 目标测算：用 workspace/forecast/ 下的正式数据测算
 .venv/bin/python -m coupon_tool demo # 优惠券测算：合成演示场景端到端
 .venv/bin/python -m pytest tests -q  # 全部测试（核心不变量 + 工作台冒烟）
 ```
@@ -51,9 +51,11 @@ coupon_tool/plugin.py            优惠券测算插件适配（/t/coupon/）
 
 各工具的独立入口（`main.py serve`、`python -m coupon_tool serve`）保留可用，前端 API 全部相对路径，独立运行与壳内运行行为一致。manifest 预留 `actions` 字段（机器可读能力声明），为未来 LLM 驱动（pi agent sdk）接入预留接口。
 
+**数据布局**：所有工具数据收编在 `workspace/{tool_id}/` 下（`workspace/forecast/{orders,metrics,output}`、`workspace/coupon/{scenarios,runs,…,output}`），不入 git。旧版顶层的 `data/`、`coupon_data/`、`output/` 在首次启动时由启动脚本自动无损迁移（`python -m workbench migrate`，幂等；目标已存在且内容不同的文件会跳过并提示，绝不覆盖）。导出下载统一在 `/t/{id}/api/export/...`：目标测算报表与中间指标、优惠券三格式导出均可直接在浏览器下载。
+
 ## 本地工作台（main.py serve）
 
-浏览器打开 `http://127.0.0.1:8300`（`--port` 可换端口）。数据与测算全部在本机完成，`data/` 为空时自动生成演示数据。
+浏览器打开 `http://127.0.0.1:8300`（`--port` 可换端口）。数据与测算全部在本机完成，`workspace/forecast/` 为空时自动生成演示数据。
 
 - **左栏**：全渠道 / 各平台视图切换（标注模式A/B）
 - **中央**：情景切换（保守/基准/挑战）、交叉校验横幅（任一视角与主口径差 >5% 会 ⚠）、KPI、月度 GMV 堆叠图（新客/老客）、三视角校验表、商品结构、月度明细
@@ -66,7 +68,7 @@ coupon_tool/plugin.py            优惠券测算插件适配（/t/coupon/）
 
 | | 模式A：订单明细 | 模式B：聚合指标 |
 |---|---|---|
-| 放置目录 | `data/orders/{平台}.xlsx` | `data/metrics/{平台}.xlsx` |
+| 放置目录 | `workspace/forecast/orders/{平台}.xlsx` | `workspace/forecast/metrics/{平台}.xlsx` |
 | 必填字段 | 日期、订单号、用户ID、商品ID、实付金额（选填：品类、件数、原价金额） | 月份、新客数、新客客单、老客数、老客复购频次、老客客单（选填：UV、新客订单数、转化率、GMV） |
 | 派生能力 | 新老客自动识别、款梯队帕累托划分、品类结构 | GMV由人公式派生；填UV则启用场视角 |
 | 主口径 | 人（场公式缺UV，无法从订单内算出） | 场（UV×转化×客单） |
@@ -90,7 +92,7 @@ coupon_tool/plugin.py            优惠券测算插件适配（/t/coupon/）
 - **三档情景**：保守/基准/挑战，参数在 `config.yaml`，按人/场/货三组分别调。
 - **交叉校验**：任一视角与主口径年化差 >5% 会在报表「04_交叉校验」打 ⚠——说明该组参数假设与其他视角矛盾，需要复核（这正是三视角的价值）。
 
-## 输出（output/）
+## 输出（workspace/forecast/output/）
 
 - `目标测算报告.xlsx`：00 说明 / 01 总盘 / 02 客群结构 / 03 商品结构 / 04 交叉校验 / 05 全渠道汇总 / 06 平台年度汇总 / 07 参数
 - `中间指标/月度指标_{平台}.csv`：统一指标层的月度明细，供核对口径
@@ -113,9 +115,9 @@ target-forecast/
 │   ├── demo.py                  # 演示数据生成（含新品上架模拟）
 │   └── templates.py             # 输入模板生成
 ├── templates/                   # 两种填数模板
-├── data/                        # orders/（模式A）、metrics/（模式B）
+├── workspace/forecast/          # orders/（模式A）、metrics/（模式B）
 ├── tests/                       # test_core.py 核心不变量 + test_server.py 工作台冒烟
-└── output/                      # 报表与中间指标
+└── workspace/forecast/output/   # 报表与中间指标（工作台内可直接下载）
 ```
 
 ---

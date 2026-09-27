@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import urllib.parse
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,7 +41,7 @@ def _scan(d: Path) -> dict:
 
 
 class WorkbenchState:
-    """data/ 的惰性加载与缓存（线程锁保护）。"""
+    """workspace/forecast 输入的惰性加载与缓存（线程锁保护）。"""
 
     def __init__(self, root: Path, caliber: dict):
         self.root = root
@@ -53,11 +54,11 @@ class WorkbenchState:
         with self.lock:
             if self.platforms and not force:
                 return
-            detail, agg = _scan(self.root / "data" / "orders"), _scan(self.root / "data" / "metrics")
+            detail, agg = _scan(self.root / "workspace" / "forecast" / "orders"), _scan(self.root / "workspace" / "forecast" / "metrics")
             if not detail and not agg:
-                print("data/ 为空，自动生成演示数据 …")
+                print("workspace/forecast 为空，自动生成演示数据 …")
                 demo.generate(self.root)
-                detail, agg = _scan(self.root / "data" / "orders"), _scan(self.root / "data" / "metrics")
+                detail, agg = _scan(self.root / "workspace" / "forecast" / "orders"), _scan(self.root / "workspace" / "forecast" / "metrics")
                 self.demo_used = True
             else:
                 self.demo_used = False
@@ -196,6 +197,23 @@ def route_get(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path:
         elif re.match(r"^/api/state(\?|$)", path):
             force = "reload=1" in path
             r.json(state.state_payload(cfg, force=force))
+        elif path == "/api/export/report":
+            f = state.root / "workspace" / "forecast" / "output" / "目标测算报告.xlsx"
+            if not f.is_file():
+                r.json({"error": "报表不存在：先运行 main.py run 生成"}, 404)
+            else:
+                r.send(200, f.read_bytes(),
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        elif m := re.fullmatch(r"/api/export/metrics/([^/?]+)(\?.*)?", path):
+            platform = urllib.parse.unquote(m.group(1))
+            if "/" in platform or "\\" in platform or ".." in platform:
+                r.json({"error": "非法平台名"}, 404)
+                return True
+            f = state.root / "workspace" / "forecast" / "output" / "中间指标" / f"月度指标_{platform}.csv"
+            if not f.is_file():
+                r.json({"error": f"中间指标不存在：{platform}（先运行 main.py run 生成）"}, 404)
+            else:
+                r.send(200, f.read_bytes(), "text/csv; charset=utf-8")
         else:
             return False
     except Exception as e:  # noqa: BLE001 —— 本地工作台把错误如实回给页面

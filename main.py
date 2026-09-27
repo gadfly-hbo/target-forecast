@@ -3,7 +3,7 @@
 
 用法：
     .venv/bin/python main.py demo       # 生成演示数据并跑通全流程（首次体验用）
-    .venv/bin/python main.py run        # 用 data/ 下的正式数据测算
+    .venv/bin/python main.py run        # 用 workspace/forecast/ 下的正式数据测算
     .venv/bin/python main.py serve      # 启动本地 HTML 工作台（--port 指定端口）
     .venv/bin/python main.py templates  # 重新生成输入模板
 """
@@ -21,7 +21,7 @@ import yaml
 from target_forecast import aggregate, demo, engine, ingest_agg, ingest_detail, report, server, templates
 
 ROOT = Path(__file__).resolve().parent
-OUT_DIR = ROOT / "output"
+OUT_DIR = ROOT / "workspace" / "forecast" / "output"
 
 
 def load_cfg() -> dict:
@@ -32,13 +32,13 @@ def load_cfg() -> dict:
 def _collect_inputs() -> tuple[dict, dict]:
     def scan(d: Path):
         return {p.stem: p for p in sorted(d.glob("*.xlsx")) if not p.name.startswith("~$")} if d.exists() else {}
-    return scan(ROOT / "data" / "orders"), scan(ROOT / "data" / "metrics")
+    return scan(ROOT / "workspace" / "forecast" / "orders"), scan(ROOT / "workspace" / "forecast" / "metrics")
 
 
 def run_flow(cfg: dict, demo_flag: bool) -> None:
     detail_files, agg_files = _collect_inputs()
     if not detail_files and not agg_files:
-        sys.exit("data/orders 与 data/metrics 下没有任何 xlsx 输入文件。先运行 `main.py demo` 或按 templates/ 模板填数。")
+        sys.exit("workspace/forecast/orders 与 workspace/forecast/metrics 下没有任何 xlsx 输入文件。先运行 `main.py demo` 或按 templates/ 模板填数。")
 
     caliber = cfg["caliber"]
     caliber["target_months"] = cfg["target"]["months"]
@@ -76,7 +76,7 @@ def run_flow(cfg: dict, demo_flag: bool) -> None:
     consolidated = aggregate.consolidate(person_all, main_all, field_all)
     plat_annual = aggregate.platform_annual(main_all, baselines)
 
-    OUT_DIR.mkdir(exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / "中间指标").mkdir(exist_ok=True)
     for platform, r in results.items():
         r["unified"].to_csv(OUT_DIR / "中间指标" / f"月度指标_{platform}.csv",
@@ -97,7 +97,7 @@ def run_flow(cfg: dict, demo_flag: bool) -> None:
         tot = consolidated[consolidated["scenario"] == scenario]["GMV_主口径"].sum()
         print(f"全渠道[{scenario}] 年度GMV: {tot:,.0f}（基期 {base_total:,.0f}，{tot / base_total - 1:+.1%}）")
     print(f"\n报表 → {out_path}")
-    print("中间月度指标 → output/中间指标/")
+    print("中间月度指标 → workspace/forecast/output/中间指标/")
 
 
 def main() -> None:
