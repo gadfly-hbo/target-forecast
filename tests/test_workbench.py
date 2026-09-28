@@ -403,3 +403,32 @@ def test_roi_static_no_root_absolute_api():
     for js in (ROOT / "roi_tool" / "static").glob("*.js"):
         text = js.read_text(encoding="utf-8")
         assert not re.search(r"""["']/api""", text), f"{js.name} 含根绝对 API 路径"
+
+
+def test_shell_collapsible_sidebars(base_url):
+    """左右侧栏可收起：左导航折叠为图标栏，助手面板为占位式可收合。"""
+    _, html = _get(base_url + "/")
+    text = html.decode()
+    # 左侧折叠控件 + 图标栏形态 + 状态记忆
+    assert 'id="sidebar-toggle"' in text
+    assert 'id="sidebar"' in text and "sidebar-collapsed" not in text  # 初始展开，类由 JS 切换
+    # 右侧助手为布局列（非 fixed 遮盖）+ 独立关闭按钮
+    assert 'id="assistant-close"' in text
+    # 空态引导（不再全空白）
+    assert "as-empty" in text or "试试问我" in text
+    _, js = _get(base_url + "/app.js")
+    jst = js.decode()
+    assert "localStorage" in jst and "sidebar-collapsed" in jst  # 折叠状态记忆
+    assert "assistant-collapsed" in jst or "collapsed" in jst    # 助手收合状态
+    _, css = _get(base_url + "/style.css")
+    ctext = css.decode()
+    assert "transition" in ctext and "width" in ctext            # 收合有过渡动画
+    assert "position: fixed" not in ctext.split(".assistant")[1].split("}")[0] if ".assistant" in ctext else True
+
+
+def test_shell_nav_icon_chips(base_url):
+    """导航 emoji 图标统一收进徽章容器，不再裸浮彩色 emoji。"""
+    _, css = _get(base_url + "/style.css")
+    assert ".nav-icon" in css.decode()
+    _, js = _get(base_url + "/app.js")
+    assert "nav-icon" in js.decode()

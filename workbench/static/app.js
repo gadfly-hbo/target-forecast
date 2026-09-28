@@ -1,7 +1,10 @@
-/* 测算工作台壳前端（无框架、离线）：工具导航 + iframe 装载 + ?tool= 深链 + 状态栏。 */
+/* 测算工作台壳前端（无框架、离线）：工具导航 + iframe 装载 + ?tool= 深链 + 状态栏 + 助手。
+   左右两侧栏均可收起，状态记在 localStorage。 */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const LS_SIDEBAR = "wb-sidebar-collapsed";
+const LS_ASSISTANT = "wb-assistant-collapsed";
 
 async function loadToolState(id) {
   // 数据源标记只来自工具现有 /api/state（PRD D5），无 demo_used 字段的工具不显示
@@ -17,14 +20,14 @@ async function main() {
   const st = await (await fetch("api/state")).json();
   const nav = $("nav");
   nav.innerHTML = st.tools
-    .map((t) => `<a class="nav-item" data-id="${t.id}" href="t/${t.id}/"><span class="icon">${t.icon}</span><span>${t.name}</span></a>`)
+    .map((t) => `<a class="nav-item" data-id="${t.id}" href="t/${t.id}/"><span class="nav-icon">${t.icon}</span><span class="nav-label">${t.name}</span></a>`)
     .join("");
 
   const items = [...nav.querySelectorAll(".nav-item")];
   const select = (id) => {
     const tool = st.tools.find((t) => t.id === id);
     items.forEach((a) => a.classList.toggle("active", a.dataset.id === id));
-    $("sb-tool").textContent = tool ? `${tool.icon} ${tool.name}` : id;
+    $("sb-tool").textContent = tool ? `${tool.name}` : id;
     loadToolState(id);
     if ($("frame").src.endsWith(`/t/${id}/`)) return;
     $("frame").src = `t/${id}/`;
@@ -42,18 +45,45 @@ async function main() {
   const first = st.tools.find((t) => t.id === requested) || st.tools[0];
   if (first) select(first.id);
   initAssistant(() => document.querySelector(".nav-item.active")?.dataset.id || first?.id);
+  initSidebars();
 }
 
-main().catch((e) => {
-  $("nav").innerHTML = `<p class="err">工作台加载失败：${e.message}</p>`;
-});
+/* ---------- 侧栏收合（状态持久化） ---------- */
+function initSidebars() {
+  const sidebar = $("sidebar");
+  const assistant = $("assistant");
 
-/* ---------- 测算助手（P3）：右侧抽屉，两步确认门，503 降级 ---------- */
+  const applySidebar = (collapsed) => {
+    sidebar.classList.toggle("sidebar-collapsed", collapsed);
+    $("sidebar-toggle").textContent = collapsed ? "»" : "«";
+    localStorage.setItem(LS_SIDEBAR, collapsed ? "1" : "0");
+  };
+  const applyAssistant = (collapsed) => {
+    assistant.classList.toggle("collapsed", collapsed);
+    localStorage.setItem(LS_ASSISTANT, collapsed ? "1" : "0");
+  };
+
+  applySidebar(localStorage.getItem(LS_SIDEBAR) === "1");
+  applyAssistant(localStorage.getItem(LS_ASSISTANT) === "1");
+
+  $("sidebar-toggle").addEventListener("click", () =>
+    applySidebar(!sidebar.classList.contains("sidebar-collapsed")));
+  $("assistant-close").addEventListener("click", () => applyAssistant(true));
+  $("assistant-toggle").addEventListener("click", () => {
+    const willOpen = assistant.classList.contains("collapsed");
+    applyAssistant(!willOpen);
+    if (willOpen) $("as-input").focus();
+  });
+}
+
+/* ---------- 测算助手：右侧面板，两步确认门，503 降级 ---------- */
 const As = { history: [], currentTool: null };
 
 function asEsc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
 function asMsg(cls, text) {
+  const empty = $("as-msgs").querySelector(".as-empty");
+  if (empty) empty.remove();
   const el = document.createElement("div");
   el.className = `as-msg ${cls}`;
   el.textContent = text;
@@ -128,11 +158,6 @@ function asRefreshFrame() {
 
 function initAssistant(currentToolGetter) {
   As.currentTool = currentToolGetter();
-  $("assistant-toggle").addEventListener("click", () => {
-    const panel = $("assistant");
-    panel.classList.toggle("hidden");
-    if (!panel.classList.contains("hidden")) $("as-input").focus();
-  });
   $("as-send").addEventListener("click", asAsk);
   $("as-input").addEventListener("keydown", (e) => { if (e.key === "Enter") asAsk(); });
   // 后端标识（回放模式明示）
@@ -145,3 +170,7 @@ function initAssistant(currentToolGetter) {
   const nav = $("nav");
   if (nav) nav.addEventListener("click", () => setTimeout(() => { As.currentTool = currentToolGetter(); }, 0));
 }
+
+main().catch((e) => {
+  $("nav").innerHTML = `<p class="err">工作台加载失败：${e.message}</p>`;
+});
