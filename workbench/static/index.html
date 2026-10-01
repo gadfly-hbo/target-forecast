@@ -8,56 +8,67 @@
 </head>
 <body>
 <div class="shell">
-  <aside id="sidebar" class="sidebar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">测</span>
-      <span class="brand-name">测算工作台</span>
-      <button type="button" id="sidebar-toggle" class="rail-btn" title="收起 / 展开导航" aria-label="收起或展开导航">«</button>
+  <header class="topbar">
+    <div class="brand" aria-label="JuanerAI，持续做出更好的决策；测算工作台">
+      <span class="brand-mark"><img src="assets/juanerai-logo-slogan.png" alt=""></span>
+      <span class="brand-copy"><strong>JuanerAI</strong><small>持续做出更好的决策</small></span>
+      <span class="product-name">测算工作台</span>
     </div>
-    <nav id="nav" aria-label="测算工具"></nav>
-    <div class="sidebar-foot">
-      <span class="foot-line">全部数据与测算在本机完成</span>
-      <span class="foot-line">不上传任何明细数据</span>
+    <div class="top-actions">
+      <span class="boundary-badge" title="全部数据与测算在本机完成，不上传任何明细数据">本机运行 · 不联网</span>
+      <button type="button" id="assistant-toggle" class="as-toggle" title="测算助手">助手</button>
     </div>
-  </aside>
+  </header>
 
-  <div class="main">
+  <div class="workspace">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-head">
+        <span class="eyebrow">TOOLS · 测算工具</span>
+        <button type="button" id="sidebar-toggle" class="rail-btn" title="收起 / 展开导航" aria-label="收起或展开导航">«</button>
+      </div>
+      <nav id="nav" aria-label="测算工具"></nav>
+      <div class="sidebar-foot">
+        <span class="foot-line">全部数据与测算在本机完成</span>
+        <span class="foot-line">不上传任何明细数据</span>
+      </div>
+    </aside>
+
     <main class="content">
       <iframe id="frame" title="测算工具"></iframe>
     </main>
-    <footer id="statusbar" class="statusbar">
-      <span id="sb-product" class="sb-item">测算工作台</span>
-      <span class="sb-sep">·</span>
-      <span id="sb-tool" class="sb-item">—</span>
-      <span id="sb-demo" class="sb-demo hidden">演示数据</span>
-      <span class="sb-spacer"></span>
-      <span id="sb-llm" class="sb-item"></span>
-      <span class="sb-item sb-meta">数据不出机器</span>
-      <button type="button" id="assistant-toggle" class="as-toggle" title="助手">🤖 助手</button>
-    </footer>
+
+    <aside id="assistant" class="assistant" aria-label="测算助手">
+      <div class="as-head">
+        <span class="as-title">测算助手</span>
+        <span id="as-backend" class="as-backend"></span>
+        <button type="button" id="assistant-close" class="rail-btn" title="收起助手" aria-label="收起助手">×</button>
+      </div>
+      <div id="as-msgs" class="as-msgs">
+        <div class="as-empty">
+          <p class="as-empty-title">用一句话驱动测算</p>
+          <p class="as-empty-item">「基准情景净贡献是多少？」</p>
+          <p class="as-empty-item">「把挑战情景新客增速调到 25%」</p>
+          <p class="as-empty-item">「比较一下 coupon-demo-001 的候选方案」</p>
+          <p class="as-empty-note">改参数的请求会先给出变更预览，确认后生效。</p>
+        </div>
+      </div>
+      <div id="as-confirm" class="as-confirm hidden"></div>
+      <div class="as-inputbar">
+        <input id="as-input" type="text" placeholder="问点什么…" aria-label="助手输入">
+        <button type="button" id="as-send">发送</button>
+      </div>
+    </aside>
   </div>
 
-  <aside id="assistant" class="assistant" aria-label="测算助手">
-    <div class="as-head">
-      <span class="as-title">测算助手</span>
-      <span id="as-backend" class="as-backend"></span>
-      <button type="button" id="assistant-close" class="rail-btn" title="收起助手" aria-label="收起助手">×</button>
-    </div>
-    <div id="as-msgs" class="as-msgs">
-      <div class="as-empty">
-        <p class="as-empty-title">用一句话驱动测算</p>
-        <p class="as-empty-item">「基准情景净贡献是多少？」</p>
-        <p class="as-empty-item">「把挑战情景新客增速调到 25%」</p>
-        <p class="as-empty-item">「比较一下 coupon-demo-001 的候选方案」</p>
-        <p class="as-empty-note">改参数的请求会先给出变更预览，确认后生效。</p>
-      </div>
-    </div>
-    <div id="as-confirm" class="as-confirm hidden"></div>
-    <div class="as-inputbar">
-      <input id="as-input" type="text" placeholder="问点什么…" aria-label="助手输入">
-      <button type="button" id="as-send">发送</button>
-    </div>
-  </aside>
+  <footer id="statusbar" class="statusbar">
+    <span id="sb-product" class="sb-item">测算工作台</span>
+    <span class="sb-sep">·</span>
+    <span id="sb-tool" class="sb-item">—</span>
+    <span id="sb-demo" class="sb-demo hidden">演示数据</span>
+    <span class="sb-spacer"></span>
+    <span id="sb-llm" class="sb-item"></span>
+    <span class="sb-item sb-meta">数据不出机器</span>
+  </footer>
 </div>
 <script src="app.js"></script>
 </body>

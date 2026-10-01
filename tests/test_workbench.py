@@ -301,7 +301,17 @@ def test_shell_statusbar(base_url):
 def test_shell_statusbar_xanthil_tokens(base_url):
     _, css = _get(base_url + "/style.css")
     text = css.decode()
-    assert ".statusbar" in text and "#f0efec" in text  # surface-2 底
+    assert ".statusbar" in text and "#f4f3ef" in text  # surface-2 底（2026-09-28 橘accent 契约）
+
+
+def test_shell_brand_and_boundary_badge(base_url):
+    """2026-09-28 契约：品牌栏（JuanerAI+slogan+产品名）+ 边界徽 + 品牌图可访问。"""
+    _, html = _get(base_url + "/")
+    text = html.decode()
+    assert "JuanerAI" in text and "持续做出更好的决策" in text
+    assert "brand-mark" in text and "boundary-badge" in text
+    status, _ = _get(base_url + "/assets/juanerai-logo-slogan.png")
+    assert status == 200
 
 
 def test_shell_assistant_panel(base_url):

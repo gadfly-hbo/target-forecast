@@ -128,11 +128,16 @@ async function asAsk() {
 function asShowConfirm(pending) {
   const box = $("as-confirm");
   box.innerHTML = `
-    <div><b>待确认变更</b>（${asEsc(pending.action)}）</div>
-    <div>${asEsc(pending.preview)}</div>
+    <div class="as-confirm-head">
+      <span class="eyebrow">PENDING CHANGE · 待确认变更</span>
+      <span class="as-state-badge">待确认 · 无业务写入</span>
+    </div>
+    <div class="as-confirm-title">${asEsc(pending.action)}</div>
+    <p class="as-confirm-preview">${asEsc(pending.preview)}</p>
     <div class="as-confirm-btns">
-      <button type="button" class="primary" id="as-ok">确认执行</button>
       <button type="button" id="as-cancel">取消</button>
+      <span class="spacer"></span>
+      <button type="button" class="primary" id="as-ok">确认执行</button>
     </div>`;
   box.classList.remove("hidden");
   $("as-ok").addEventListener("click", async () => {

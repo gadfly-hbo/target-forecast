@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -77,10 +78,14 @@ def make_handler(registry: Registry, assistant=None):
             elif self.path.split("?")[0] in ("/", "/index.html"):
                 # 容忍 query string：旧启动脚本的 /?tool=xxx 深链自 P0 起就在这里 404（P2 e2e 暴露）
                 _send(self, 200, (SHELL_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
-            elif self.path in ("/style.css", "/app.js"):
-                f = SHELL_DIR / self.path.lstrip("/")
-                ctype = "text/css" if f.suffix == ".css" else "application/javascript"
-                _send(self, 200, f.read_bytes(), f"{ctype}; charset=utf-8")
+            elif self.path in ("/style.css", "/app.js") or self.path.startswith("/assets/"):
+                f = (SHELL_DIR / self.path.lstrip("/")).resolve()
+                if not str(f).startswith(str(SHELL_DIR.resolve()) + os.sep) or not f.is_file():
+                    _send(self, 404, b'{"error": "not found"}', "application/json; charset=utf-8")
+                    return
+                ctype = {"css": "text/css", "js": "application/javascript", "png": "image/png"}.get(
+                    f.suffix.lstrip("."), "application/octet-stream")
+                _send(self, 200, f.read_bytes(), f"{ctype}; charset=utf-8" if ctype.startswith("text") else ctype)
             elif self.path == "/api/assistant/status" and assistant is not None:
                 _send(self, 200, _json_bytes({"backend": type(assistant.backend).__name__}),
                       "application/json; charset=utf-8")
