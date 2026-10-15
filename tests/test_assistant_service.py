@@ -200,23 +200,35 @@ def test_roi_set_plan_net_none_guard():
 # ---------- 阶段5 门禁A3：_execute 四条零覆盖分支的执行测试 ----------
 
 COUPON_STATE = {"scenarios": ["coupon-demo-001"], "runs": ["run-1", "run-2"]}
-FORECAST_CALC_FULL = {"consolidated": [{"scenario": "挑战", "GMV_主口径": 123456.0}]}
 
 
 class FakeHttp3(FakeHttp):
-    """补充 get_state×3 / forecast__calc / coupon__list_runs / coupon__compare 需要的路径。"""
+    """补充 get_state×3 / forecast__calc / coupon__list_runs / coupon__compare 需要的路径。
+
+    覆写 __call__ 只记录一次；父类的 fallthrough 映射内联（父类 __call__ 会重复记录）。
+    """
 
     def __call__(self, method, path, body=None):
         self.calls.append((method, path, body))
         if path == "/t/coupon/api/state":
             return COUPON_STATE
         if path == "/t/coupon/api/runs":
-            return COUPON_STATE["runs"] if method == "GET" else {"runs": COUPON_STATE["runs"]}
+            return COUPON_STATE["runs"]
         if path == "/t/coupon/api/scenario/coupon-demo-001":
             return {"scenario_id": "coupon-demo-001"}
         if path == "/t/coupon/api/compare":
             return {"rows": [{"label": "无券"}, {"label": "满159减10"}]}
-        return super().__call__(method, path, body)
+        if path == "/t/roi/api/calc":
+            return ROI_CALC_RESULT
+        if path == "/t/roi/api/state":
+            return ROI_STATE
+        if path == "/t/forecast/api/state":
+            return FORECAST_STATE
+        if path == "/t/forecast/api/calc":
+            return FORECAST_CALC
+        if path in ("/t/forecast/api/assistant_params", "/t/roi/api/assistant_params"):
+            return {"saved": True}
+        raise AssertionError(f"未预期的调用: {method} {path}")
 
 
 def _svc3():
@@ -245,11 +257,14 @@ def test_forecast_calc_branch():
 def test_coupon_list_runs_branch_dual_shape():
     svc, http = _svc3()
     assert svc._execute({"name": "coupon__list_runs", "args": {}}) == "已封存运行 2 个：run-1, run-2"
-    # dict 形态容错
-    http2 = FakeHttp3()
-    http2.__class__ = type("H", (FakeHttp3,), {
-        "__call__": lambda self, m, p, b=None: {"runs": COUPON_STATE["runs"]} if p == "/t/coupon/api/runs" else FakeHttp3.__call__(self, m, p, b)})
-    svc2 = AssistantService(build_default_registry(ROOT), EchoBackend(FIXTURES), http2)
+    # dict 形态容错：runs 路径返回 {"runs": [...]} 而非裸 list
+    class FakeHttp3Dict(FakeHttp3):
+        def __call__(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            if path == "/t/coupon/api/runs":
+                return {"runs": COUPON_STATE["runs"]}
+            return FakeHttp3.__call__(self, method, path, body)
+    svc2 = AssistantService(build_default_registry(ROOT), EchoBackend(FIXTURES), FakeHttp3Dict())
     assert svc2._execute({"name": "coupon__list_runs", "args": {}}).startswith("已封存运行 2 个")
 
 
