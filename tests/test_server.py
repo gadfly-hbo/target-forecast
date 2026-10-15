@@ -28,9 +28,7 @@ def base_url():
     httpd.shutdown()
 
 
-def _get(url):
-    with urllib.request.urlopen(url, timeout=30) as r:
-        return r.status, r.read()
+from _http import get_raw as _get
 
 
 def _post(url, obj):

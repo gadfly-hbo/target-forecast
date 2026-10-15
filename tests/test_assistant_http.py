@@ -28,19 +28,7 @@ def _start(service):
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
 
 
-def _post(url, obj):
-    req = urllib.request.Request(url, data=json.dumps(obj).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return r.status, json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
-
-
-def _get(url):
-    with urllib.request.urlopen(url, timeout=30) as r:
-        return r.status, json.loads(r.read())
+from _http import get_json as _get, post as _post
 
 
 @pytest.fixture(scope="module")
