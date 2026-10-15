@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "测算工作台 LLM 助手 sidecar：pi-ai 驱动的小米 MIMO（openai-completions），Python 壳只代理",
+  "description": "测算工作台 LLM 助手 sidecar：pi-agent-runtime 全托管（runAgent 工具循环 + 写提案确认门）",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "node --test test/*.test.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.86.1"
+    "pi-agent-runtime": "file:../../pi-agent-runtime"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

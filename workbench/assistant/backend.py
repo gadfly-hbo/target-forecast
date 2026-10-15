@@ -34,7 +34,7 @@ class EchoBackend:
         self.fixtures = fixtures
         self.calls = 0  # 测试可断言调用次数
 
-    def chat(self, messages: list[dict], tools: list[dict]) -> ChatResult:
+    def chat(self, messages: list[dict], tools: list[dict], write_names=None) -> ChatResult:
         self.calls += 1
         has_tools = any(m.get("role") == "tool" for m in messages)
         last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
@@ -71,8 +71,9 @@ class PiSidecarBackend:
         except Exception:  # noqa: BLE001 —— 探测只问可达性
             return False
 
-    def chat(self, messages: list[dict], tools: list[dict]) -> ChatResult:
-        body = json.dumps({"messages": messages, "tools": tools}).encode("utf-8")
+    def chat(self, messages: list[dict], tools: list[dict], write_names=None) -> ChatResult:
+        body = json.dumps({"messages": messages, "tools": tools,
+                           "write_actions": sorted(write_names or [])}).encode("utf-8")
         req = urllib.request.Request(self.url + "/chat", data=body,
                                      headers={"Content-Type": "application/json"}, method="POST")
         try:
@@ -98,8 +99,8 @@ class OpenAiCompatBackend:
         self.model = model
         self.timeout = timeout
 
-    def chat(self, messages: list[dict], tools: list[dict]) -> ChatResult:
-        body = {"model": self.model, "messages": messages}
+    def chat(self, messages: list[dict], tools: list[dict], write_names=None) -> ChatResult:
+        body = {"model": self.model, "messages": messages}  # x-write 名册仅 sidecar 私有协议需要
         if tools:
             body["tools"] = tools
         req = urllib.request.Request(

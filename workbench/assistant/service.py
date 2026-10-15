@@ -48,7 +48,8 @@ class AssistantService:
             *(payload.get("history") or []),
             {"role": "user", "content": payload.get("message", "")},
         ]
-        result = self.backend.chat(messages, tools_mod.to_openai(self.tools))
+        write_names = {t["function"]["name"] for t in self.tools if t["function"].get("x-write")}
+        result = self.backend.chat(messages, tools_mod.to_openai(self.tools), write_names=write_names)
         if result.orchestrated:
             return self._relay_orchestrated(result)
         executed: list[tuple[dict, str]] = []
@@ -77,7 +78,7 @@ class AssistantService:
             summaries = [(tc, self._execute(tc)) for tc in known]
             executed.extend(summaries)
             messages = self._feed(messages, result, summaries)
-            result = self.backend.chat(messages, tools_mod.to_openai(self.tools))
+            result = self.backend.chat(messages, tools_mod.to_openai(self.tools), write_names=write_names)
 
         return {"reply": result.reply or executed[-1][1], "tool_calls": [{**tc, "summary": s} for tc, s in executed],
                 "pending_confirmation": None}

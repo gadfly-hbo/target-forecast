@@ -155,7 +155,8 @@ def maybe_start_sidecar(root: Path, shell_url: str | None = None) -> subprocess.
            "WORKBENCH_LLM_API_KEY": cfg.get("api_key", ""),
            "WORKBENCH_LLM_BASE_URL": cfg.get("base_url", MIMO_BASE_URL),
            "WORKBENCH_LLM_MODEL": cfg.get("model", DEFAULT_MODEL),
-           "WORKBENCH_SHELL_URL": shell_url or "http://127.0.0.1:8300"}
+           "WORKBENCH_SHELL_URL": shell_url or "http://127.0.0.1:8300",
+           "WORKBENCH_ROOT": str(Path(root).resolve())}
     try:
         proc = subprocess.Popen([node, str(entry)], cwd=sidecar_dir, env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
