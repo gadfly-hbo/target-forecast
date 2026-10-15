@@ -76,62 +76,69 @@ def export_json(run: dict, path: str) -> str:
     return path
 
 
-def export_markdown(run: dict, path: str, decision: dict | None = None) -> str:
-    sc = run["scenario"]
-    results = run["results"]
-    ranking = results.get("ranking_rows") or []
-    top = ranking[0] if ranking else None
-    lines: list[str] = []
-    add = lines.append
-
+def _section_header(add, run: dict, sc: dict, results: dict) -> None:
     add("# 优惠券测算决策摘要")
     add("")
     add(f"- 场景：{sc.get('scenario_id')}　场景版本：{sc.get('schema_version')}　运行 ID：`{run['run_id']}`")
     add(f"- 引擎版本：{run['engine_version']}　证据状态：{sc.get('evidence_status')}")
     add(f"- 结论类型：{results['conclusion']['type']}——{results['conclusion']['message']}")
     add("")
-    if top is not None:
-        m = top["metrics"]
-        add("## 基准排序首选（条件性建议，非全局最优）")
-        add("")
-        add(f"- 券组合：**{top['label']}**"
-            + ("（受控亏损）" if top.get("controlled_loss") else ""))
-        add(f"- 相对无券的增量贡献：{m['incremental_contribution_cents'] / 100:.2f} 元")
-        add(f"- 商家预计券补：{m['merchant_subsidy_cents'] / 100:.2f} 元")
-        add(f"- 转化变化：{(m['delta_c']) * 100:.4f} 个百分点（相对变化 "
-            f"{m['delta_c'] / sc['baseline']['conversion_rate'] * 100 if sc['baseline']['conversion_rate'] else 0:.2f}%）")
-        add(f"- 净增量 ROI：{_roi_str(m['roi'])}")
-        add("")
-        be = top.get("breakeven")
-        add("### 回本条件")
-        if be:
-            if be.get("nonpositive_pi_new"):
-                add(f"- {be.get('note', '')}")
-            else:
-                add(f"- 所需毛新增成交率 ΔC⁺ = {be['d_c_plus_be']:.4%}（对应最终转化率 "
-                    f"{be['c_be']:.4%}，净变化 {be['delta_c_be'] * 100:.4f} pp）")
-                add(f"- 可触达非购买者上限：{be['reachable_cap']:.4%}——"
-                    + ("未超限" if be["within_reachable_cap"] else "**超过上限：当前假设下不可回本**"))
-                add(f"- 该新增量下商家券补：{(be.get('merchant_subsidy_at_be_cents') or 0) / 100:.2f} 元，"
-                    + ("预算内" if be.get("budget_ok_at_be") else "**超预算**"))
+
+
+def _section_top(add, top: dict, sc: dict) -> None:
+    m = top["metrics"]
+    add("## 基准排序首选（条件性建议，非全局最优）")
+    add("")
+    add(f"- 券组合：**{top['label']}**"
+        + ("（受控亏损）" if top.get("controlled_loss") else ""))
+    add(f"- 相对无券的增量贡献：{m['incremental_contribution_cents'] / 100:.2f} 元")
+    add(f"- 商家预计券补：{m['merchant_subsidy_cents'] / 100:.2f} 元")
+    add(f"- 转化变化：{(m['delta_c']) * 100:.4f} 个百分点（相对变化 "
+        f"{m['delta_c'] / sc['baseline']['conversion_rate'] * 100 if sc['baseline']['conversion_rate'] else 0:.2f}%）")
+    add(f"- 净增量 ROI：{_roi_str(m['roi'])}")
+    add("")
+
+
+def _section_breakeven(add, top: dict) -> None:
+    be = top.get("breakeven")
+    add("### 回本条件")
+    if be:
+        if be.get("nonpositive_pi_new"):
+            add(f"- {be.get('note', '')}")
         else:
-            add("- （该候选为无券基准或不可行，无回本条件）")
-        add("")
-        add("### 收益来自（与总 ΔΠ 对平）")
-        d = top.get("decomposition") or {}
-        if d:
-            for key, name in [("natural_redemption", "自然核销影响"), ("topup", "加购"),
-                              ("other_retained", "其他保留成交"), ("lost_orders", "流失订单损失"),
-                              ("new_orders", "新增成交"), ("fixed_costs", "新增固定费用")]:
-                add(f"- {name}：{d.get(key, 0) / 100:.2f} 元")
-        add("")
-        add("### 邻近候选与未选原因")
-        if top.get("neighbors"):
-            for nb in top["neighbors"]:
-                add(f"- {nb['label']}：{'可行' if nb['feasible'] else '被过滤——' + (nb['filtered_reason'] or '')}")
-        else:
-            add("- （无相邻候选）")
-        add("")
+            add(f"- 所需毛新增成交率 ΔC⁺ = {be['d_c_plus_be']:.4%}（对应最终转化率 "
+                f"{be['c_be']:.4%}，净变化 {be['delta_c_be'] * 100:.4f} pp）")
+            add(f"- 可触达非购买者上限：{be['reachable_cap']:.4%}——"
+                + ("未超限" if be["within_reachable_cap"] else "**超过上限：当前假设下不可回本**"))
+            add(f"- 该新增量下商家券补：{(be.get('merchant_subsidy_at_be_cents') or 0) / 100:.2f} 元，"
+                + ("预算内" if be.get("budget_ok_at_be") else "**超预算**"))
+    else:
+        add("- （该候选为无券基准或不可行，无回本条件）")
+    add("")
+
+
+def _section_decomposition(add, top: dict) -> None:
+    add("### 收益来自（与总 ΔΠ 对平）")
+    d = top.get("decomposition") or {}
+    if d:
+        for key, name in [("natural_redemption", "自然核销影响"), ("topup", "加购"),
+                          ("other_retained", "其他保留成交"), ("lost_orders", "流失订单损失"),
+                          ("new_orders", "新增成交"), ("fixed_costs", "新增固定费用")]:
+            add(f"- {name}：{d.get(key, 0) / 100:.2f} 元")
+    add("")
+
+
+def _section_neighbors(add, top: dict) -> None:
+    add("### 邻近候选与未选原因")
+    if top.get("neighbors"):
+        for nb in top["neighbors"]:
+            add(f"- {nb['label']}：{'可行' if nb['feasible'] else '被过滤——' + (nb['filtered_reason'] or '')}")
+    else:
+        add("- （无相邻候选）")
+    add("")
+
+
+def _section_stress(add, run: dict, top) -> None:
     stress = run.get("stress")
     add("### 最敏感假设与不利情景")
     if stress and stress.get("sensitive_params"):
@@ -149,10 +156,16 @@ def export_markdown(run: dict, path: str, decision: dict | None = None) -> str:
     else:
         add("- （本次运行未配置敏感性情景——压力结论缺失，不能视为稳健）")
     add("")
+
+
+def _section_limitations(add, top) -> None:
     add("### 已知限制")
     for lim in (top.get("limitations") if top else None) or []:
         add(f"- {lim}")
     add("")
+
+
+def _section_decision(add, decision: dict | None) -> None:
     add("### 人工确认")
     if decision:
         add(f"- 选择：{decision.get('choice')}")
@@ -163,6 +176,25 @@ def export_markdown(run: dict, path: str, decision: dict | None = None) -> str:
         add("- 确认依据 / 未采纳模型排序的原因：____")
         add("> 人工选择不要求与排序第一一致，但必须保留理由；人工确认只代表业务选择，不代表模型被实验验证。")
     add("")
+
+
+def export_markdown(run: dict, path: str, decision: dict | None = None) -> str:
+    sc = run["scenario"]
+    results = run["results"]
+    ranking = results.get("ranking_rows") or []
+    top = ranking[0] if ranking else None
+    lines: list[str] = []
+    add = lines.append
+
+    _section_header(add, run, sc, results)
+    if top is not None:
+        _section_top(add, top, sc)
+        _section_breakeven(add, top)
+        _section_decomposition(add, top)
+        _section_neighbors(add, top)
+    _section_stress(add, run, top)
+    _section_limitations(add, top)
+    _section_decision(add, decision)
     add("---")
     add("*本摘要由确定性引擎生成；所有数字可经运行记录 JSON 重放复核。合成参数与演示结果不是真实经营证据。*")
     with open(path, "w", encoding="utf-8") as fh:
