@@ -199,3 +199,73 @@ def test_compare_nan_output_rejected_as_422(base_url):
     assert status == 422
     assert out["error"].startswith("请求不合法")
     assert "not JSON compliant" in out["error"]
+
+
+# ---------- OverflowError 空洞矩阵（超 float 范围输入不得断连） ----------
+
+def _scenario_with(base_url, mutate):
+    _, demo = _post(base_url + "/api/demo", {})
+    scenario = demo["scenario"]
+    mutate(scenario)
+    return scenario
+
+
+def test_overflow_candidate_threshold_infeasible_row(base_url):
+    """候选门槛溢出 → _validate_candidate SpecError → compare 的 per-candidate catch
+    → 200 + coupon_legality 不可行行（与 F≥T 同语义；文案禁 float 除法，10**311 亦不炸）。"""
+    for huge in (10**309, 10**311):
+        sc = _scenario_with(base_url, lambda s: s.__setitem__(
+            "candidates", [{"enabled": True, "threshold_cents": huge,
+                            "face_value_cents": 500, "label": "溢出门槛"}]))
+        status, out = _post(base_url + "/api/compare", {"scenario": sc})
+        assert status == 200, out
+        row = next(r for r in out["rows"] if r["label"] == "溢出门槛")
+        assert row["metrics"] is None
+        assert row["violations"][0]["constraint"] == "coupon_legality"
+        assert "超出可计算范围" in row["violations"][0]["message"]
+
+
+def test_overflow_basket_amount_422(base_url):
+    sc = _scenario_with(base_url, lambda s: s["baseline"]["baskets"][0].__setitem__("amount_cents", 10**309))
+    status, out = _post(base_url + "/api/compare", {"scenario": sc})
+    assert status == 422 and "场景不合法" in out["error"] and "超出可计算范围" in out["error"]
+
+
+def test_overflow_topup_422(base_url):
+    sc = _scenario_with(base_url, lambda s: s["baseline"]["baskets"][1].__setitem__("topup_amount_cents", 10**309))
+    status, out = _post(base_url + "/api/compare", {"scenario": sc})
+    assert status == 422 and "场景不合法" in out["error"]
+
+
+def test_overflow_new_basket_amount_422(base_url):
+    sc = _scenario_with(base_url, lambda s: s["behavior"].__setitem__(
+        "new_basket", [{"label": "n", "weight": 1.0, "amount_cents": 10**309, "margin_rate": 0.3, "redeem": 1}]))
+    status, out = _post(base_url + "/api/compare", {"scenario": sc})
+    assert status == 422 and out["error"].startswith("请求不合法")
+
+
+def test_overflow_conversion_rate_422(base_url):
+    sc = _scenario_with(base_url, lambda s: s["baseline"].__setitem__("conversion_rate", 10**309))
+    status, out = _post(base_url + "/api/compare", {"scenario": sc})
+    assert status == 422 and "场景不合法" in out["error"]  # load_spec 内 OverflowError → SpecError
+
+
+def test_overflow_q_table_422(base_url):
+    sc = _scenario_with(base_url, lambda s: s["behavior"].update(
+        q_mode="table", q_table=[{"q": 10**309}]))
+    status, out = _post(base_url + "/api/compare", {"scenario": sc})
+    assert status == 422 and out["error"].startswith("请求不合法")  # route_post 兜底
+
+
+def test_overflow_new_basket_weight_422(base_url):
+    sc = _scenario_with(base_url, lambda s: s["behavior"].__setitem__(
+        "new_basket", [{"label": "n", "weight": 10**309, "amount_cents": 15900, "margin_rate": 0.3, "redeem": 1}]))
+    status, out = _post(base_url + "/api/compare", {"scenario": sc})
+    assert status == 422 and out["error"].startswith("请求不合法")  # _check_new_basket 求和溢出→兜底
+
+
+def test_overflow_import_row_422(base_url):
+    rows = [{"bucket_min_cents": 10**309, "bucket_max_cents": 8999, "avg_amount_cents": 7500,
+             "orders": 200, "avg_margin_rate": 0.30}]
+    status, out = _post(base_url + "/api/import", {"mode": "buckets", "rows": rows})
+    assert status == 422 and out["error"].startswith("请求不合法")  # ingest float 强转→兜底

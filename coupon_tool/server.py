@@ -320,8 +320,10 @@ POST_ROUTES = {
 def route_post(app: Workbench, h, path: str) -> bool:
     """处理 POST；返回 False 表示未命中（调用方回 404）。
 
-    外层异常映射保持原状：SpecError → 422 str(exc)；ValueError/KeyError/TypeError
-    → 422 "请求不合法：{exc}"；FileNotFoundError 仅 /api/review 内层捕获。
+    外层异常映射：SpecError → 422 str(exc)；ValueError/KeyError/TypeError/OverflowError
+    → 422 "请求不合法：{exc}"（OverflowError 覆盖 float() 强转溢出——q_table.q、
+    new_basket.weight、/api/import 行等不经 _int_cents 的路径）；
+    FileNotFoundError 仅 /api/review 内层捕获。
     """
     handler = POST_ROUTES.get(path)
     if handler is None:
@@ -331,7 +333,7 @@ def route_post(app: Workbench, h, path: str) -> bool:
         handler(app, r)
     except SpecError as exc:
         r.json({"error": str(exc)}, 422)
-    except (ValueError, KeyError, TypeError) as exc:
+    except (ValueError, KeyError, TypeError, OverflowError) as exc:
         r.json({"error": f"请求不合法：{exc}"}, 422)
     return True
 

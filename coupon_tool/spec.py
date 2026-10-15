@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field, asdict
 
 ENGINE_VERSION = "0.1.0"
@@ -19,6 +20,8 @@ class SpecError(ValueError):
 def _int_cents(value, name):
     if isinstance(value, bool) or not isinstance(value, int):
         raise SpecError(f"{name} 必须是整数分（int），得到 {value!r}")
+    if abs(value) > sys.float_info.max:  # float() 会抛 OverflowError 且不被 ValueError 捕获
+        raise SpecError(f"{name} 超出可计算范围（约 1.8e308 分）")
     return value
 
 
@@ -320,7 +323,7 @@ def load_spec(data: dict, strict: bool = True) -> ScenarioSpec:
         )
     except SpecError:
         raise
-    except (TypeError, KeyError, ValueError) as exc:
+    except (TypeError, KeyError, ValueError, OverflowError) as exc:
         raise SpecError(f"场景结构不合法：{exc}") from exc
 
     if strict:

@@ -1,83 +1,62 @@
-# PRD：重构阶段5（收官批）
+# PRD：OverflowError 空洞修复
 
-> 规格来源：`.flow/proposal.md`。红队报告：`.flow/red-team.md`（GO，5 项先决条件全部采纳；含 NaN 配方实证与 GET 语义事实纠错）。
+> 规格来源：`.flow/proposal.md`。红队：`.flow/red-team.md`（GO，3 准入全部采纳；含 10+ 字段崩溃面实测与桶界前提纠错）。
 
 ## Problem Statement
 
-重构方案剩余三个复杂度热点（spec._check_behavior 19/31、exports.export_markdown 15/31、assistant service._execute 11/15）+ 三项历史遗留 + 跨测试文件的 HTTP helper 重复。红队实证：三个"行为不变"重构中两个（spec errors 顺序、markdown 字节）没有任何现有测试钉住其行为面，一个（assistant）有 4/8 分支零执行覆盖——照搬前四阶段"先门禁后重构"的纪律是本批成立的前提。
+整数分/比率字段超出 float 可表示范围（>~1.8e308）时，`load_spec` 与 engine 的 float 强转抛 OverflowError（⊄ ValueError），route_post 外层捕获元组接不住 → 连接重置无响应。实证崩溃面不止提案的四条 int-cents 路径：`load_spec` 内 10 个 float 强转字段（conversion_rate、cost 七字段、reach_new、constraints）、`q_table[].q`、`new_basket[].weight`、`/api/import` 行内大整数同样断连。
 
 ## Solution
 
-七项任务、每项独立提交、门禁先行：三组 characterization/封存测试对现状先绿（spec 顺序钉死、markdown sha256、assistant 分支执行），随后三项行为不变重构 + 两项零风险清理 + NaN 负向测试 + helper 去重（以红队实测的三种 GET 语义地图为准）。
+三层修复（红队准入①：层 3 为**必选主修复**，非防御性可选项）：
+
+1. **`spec.py _int_cents`**：`abs(value) > sys.float_info.max` → `SpecError(f"{name} 超出可计算范围（|值| > {sys.float_info.max:.0e}）")`——篮子 amount/topup 的 choke point → load_spec 阶段 422"场景不合法"。
+2. **`engine.py _validate_candidate`**：t/f 加同一上限 → SpecError（文案**原值插值，禁 float 除法**）→ 经 compare per-candidate catch 变 200 + coupon_legality 不可行行（与 F≥T 同语义；stress 静默丢弃该行——记行为说明）。**不 bump ENGINE_VERSION**（准入②）。
+3. **`load_spec` 内部**：`except (TypeError, KeyError, ValueError)` 元组加 `OverflowError`，统一 `raise SpecError(f"场景结构不合法：{exc}") from exc`——10 个 float 强转字段归入"场景不合法"文案族（422 带前缀）。
+4. **`coupon_tool/server.py route_post` 外层**：捕获元组加 `OverflowError` → 422"请求不合法：{exc}"——q_table.q / new_basket.weight / import 行 / breakeven 乘积 / 未来转换点的唯一覆盖。
 
 ## User Stories
 
-1. As a 维护者，I want `_check_behavior` 按连续块拆成小函数，so that 校验规则可局部阅读且 errors 顺序零漂移
-2. As a 运营用户，I want 导出的决策摘要 markdown 字节级不变，so that 历史对比与归档不失效
-3. As a 助手用户，I want assistant 的 8 条 action 分发语义不变，so that 问答/调参行为零变化
-4. As a 审查者，I want 三组门禁（顺序字面量 / markdown sha256 / 分支执行测试）先行封存，so that "行为不变"可证伪
-5. As a 维护者，I want HTTP 测试 helper 只有一份，so that 新测试不复制第三种 GET 语义
-6. As a 维护者，I want NaN 引擎输出被 422 拒绝的行为有测试钉住，so that 阶段1 deliberate-change #5 的语义不回退
+1. As a 工作台用户，I want 任何超出 float 范围的输入得到明确 422/不可行行，so that 不再面对连接重置
+2. As a 中文优先用户，I want 场景字段溢出报"场景不合法"（中文）而非英文内部异常文案，so that 错误可理解
+3. As a 维护者，I want 指纹/顺序/NaN 三类门禁保持绿，so that 五阶段成果零回退
 
 ## Implementation Decisions
 
-1. **A1 spec._check_behavior 拆分**：**按连续代码块切**（红队 K1：领域主题切分会把 reach_new 从循环错误后移到前——errors 顺序即 API 文案）。切分边界：①四名字概率循环（:177-184）②reach_new（:185）③q_mode/q_curve/q_table（:186-196）④conversion（:197-208）⑤new_basket（:209-219）。五个块函数按原顺序在 `_check_behavior` 内依次 extend；**门禁先行**：构造触发 ≥4 类错误的 fixture，断言 `validate_spec(spec)["errors"]` 精确等于完整列表字面量。errors 与 warnings 无混排（红队确认：warnings 全在 validate_spec）。
-2. **A2 export_markdown 拆分**：按输出段落拆 `_section_*` 渲染函数；`add("")` 空行与 `---` 分隔线归属跟随段落；**门禁先行**：sha256 封存（decision 有/无 × stress 有/无 ≥2 形态，run_id 归一后 inline 哈希）。
-3. **A3 assistant _execute 表驱动**：**门禁先行**：先补 4 条零覆盖分支的执行测试（get_state×3 工具共享分支、forecast__calc、coupon__list_runs 双形状、coupon__compare），照 `test_roi_set_plan_net_none_guard` 模式（Echo fixture + FakeHttp 分叉 + 摘要断言）。表形状：`{(tool_id, action): handler}` 或按现有 `x-action` 元数据 + 全名两级查键——保留 get_state 元数据优先判定顺序与兜底 `已执行 {name}`。
-4. **B1 NaN 负向测试**（阶段1 遗留）：红队实证配方——`baskets[0]["amount_cents"] = 2*10**306` 经 `/api/compare` → 422 且 error 以"请求不合法"开头。**OverflowError 空洞（threshold=10**309 → 无响应）只记录交接卡不修**（范围外既有行为）。
-5. **B2 e_pi_after 删除**（阶段4 红线保留项）：三处写零读，删除后指纹 19/19 必须仍绿（第二重保险）。
-6. **B3 numpy 导入删除**：`target_forecast/server.py:17` 一行。
-7. **C1 helper 去重**：新建 `tests/_http.py` 纯函数模块（prepend 模式可直接 import；不用 conftest fixture——放大 diff）。**以红队实测地图为准**：`_post` 四合一（timeout=60、JSON、捕获 HTTPError）；GET 保留**三种**命名清晰的语义——`get_raw`（bytes、抛 HTTPError）/ `get_json`（JSON、抛 HTTPError）/ `get_json_or_error`（JSON、捕获）——三文件改 import，各自调用点不改语义。**"抛异常 GET"是被 test_workbench 404 测试依赖的语义，禁止折叠**。
-8. **提交粒度**（红队条件⑤）：每项独立提交——三组门禁测试可合一个 `test` 提交或随各自重构提交先行；顺序建议：门禁→A1→A2→A3→C1（test-only）→B1（test-only）→B2+B3（零风险清理，一个提交）。
+- 上界统一用 `sys.float_info.max`（int/float 比较精确安全；NaN 配方 2e306 天然在界内）。
+- 响应形状三分（红队 K2 确认可接受并记录）：篮子 int-cents → 422"场景不合法"；候选 t/f → 200 不可行行；load_spec 比率/兜底路径 → 422（前者"场景不合法"、后者"请求不合法"）。
+- 桶界不纳入（红队 K4：10³⁰⁹ 不炸，≥1.8e310 由层 4 覆盖）。
+- CLI 已有 SpecError exit 2，无额外处理；已落盘的含巨大值 scenarios/*.json 在 CLI 下仍 traceback——记"限制"，不加码。
 
 ## Testing Decisions
 
-- 好测试 = 外部可观察行为（errors 列表字面量、markdown sha256、摘要串与调用序列、HTTP 状态码与错误文案）。
-- 三组门禁对现状先绿后再动各自的生产代码；指纹门禁（tests/test_engine_fingerprint.py）在 B2 前后各跑一次。
-- 回归：全量 `pytest`（当前基线 214 passed；本批新增约 8-10 条测试）。
-- 复杂度复查：图谱 query_graph，三个目标函数拆分后无 ≥15 残留。
+- 回归矩阵（真 socket，追加到 `tests/test_coupon_server.py`）：四条原路径（threshold/basket amount/topup/new_basket amount → 422 或 200 不可行行）+ 红队准入①四条（conversion_rate → 422 场景不合法；q_table.q → 422 请求不合法；new_basket.weight → 422；/api/import 行 → 422）+ t=10**311 → **200 不可行行**（钉死文案不因 float 除法再炸）。
+- 门禁不回退：`test_engine_fingerprint.py` 19/19、`test_compare_nan_output_rejected_as_422`、errors 顺序钉死、全量 pytest。
 
 ## Out of Scope
 
-- OverflowError 空洞修复（记录）
-- report.py 第三份 concat（阶段2 已划出）
-- 前端静态文件、引擎数学、compare 的候选级 SpecError 吞噬语义
-- 校验规则表驱动化（原方案"可选不必做"）
+- 桶界 10³⁰⁹~1.8e310 区间的 limitation 滑稽长数字文案（不崩溃，红队 K4）
+- 已落盘脏 scenario 文件的 CLI traceback
+- workbench 壳/assistant（复用 route_post 与 HTTP 回环，自动覆盖）
 
-## PRD diff gate（相对 proposal.md 的差异）
+## PRD diff gate（相对 proposal.md）
 
-proposal 硬约束全部保留。差异：
-
-1. **A1 拆分方式修正**：提案开放问题 1 的"按校验主题"被**显式否决**——按连续块切（红队 K1：主题切分重排 errors 文案，无测试钉住，属违反硬约束 2 的诱导）。
-2. **A3 增加前置**：4 条分支执行测试先行（红队 K3：无人区作业禁止）。
-3. **C1 事实修正**：提案"两种 GET"错误——实为三种语义且"不捕获"被测试依赖；落点拍板 `tests/_http.py`（红队 K4）。
-4. **B1 配方拍板**：红队实证的 2×10³⁰⁶ 配方，否决 mock 路线；OverflowError 空洞显式记录不修。
-5. **新增**：每项独立提交的粒度要求（红队条件⑤）。
-
-## GRILL 决议
-
-### 第 1 轮（author-blind 子代理，2026-10-15）
-
-- 见附录（若与本 PRD 正文冲突以正文为准）。
-
-### 第 2 轮（主代理）
-
-- 枚举零新增开放问题（七项的门禁、边界、提交序全部由红队条件+本 PRD 钉死）——**GRILL converged after 2 rounds**。
+1. 层 3（route_post 兜底）从"belt-and-braces"升为**必选主修复**，新增层 3'（load_spec 内 OverflowError→SpecError 一行）——红队 K1/K2（崩溃面 3 倍低估）。
+2. 回归矩阵从 4 条扩至 9 条（准入①）。
+3. 桶界开放问题按实测关闭：不纳入，理由改写（红队 K4）。
+4. 新增禁令：不 bump ENGINE_VERSION、新文案禁 float 除法（红队 K3）。
 
 ---
 
-## GRILL 决议（替换占位）
+## GRILL 决议
 
-### 第 1 轮（author-blind 子代理，2026-10-15，7 包全按推荐 (b) 采纳）
+### 第 1 轮（author-blind 子代理，2026-10-15，4 包全按 (A) 采纳）
 
-- **Q1 门禁A1 fixture**：五块全覆盖 + 块内多错误——`build_synthetic_spec()` 后**直接改 dataclass**（绕开 load_spec 的 float() 强转陷阱）：`redeem_natural=1.5, reach_new=1.5, q_mode="banana", q_curve={q_cap:1.5,lam:-1,d_ref:-1}, conversion={mode:relative,k:-1,s_max:-1}, new_basket=[{weight:0.6,amount_cents:"x",redeem:2}]`；断言 `validate_spec(spec)["errors"]` 精确等于完整字面量（基线/cost/constraints 干净 → errors 恰为 _check_behavior 输出）。
-- **Q2 门禁A2 归一**：`run["run_id"] = "run-SEALED"` 在 dict 层覆写后再调 export_markdown（单点归一、无行格式耦合）；created_at 不渲染，run_id 是唯一非确定性。
-- **Q3 门禁A2 形态**：3 形态——对角两形态（stress+decision 全开 / 全关）+ top 缺席形态（`{**run, "results": {**r, "ranking_rows": []}}` 手工截断——export_markdown 是 run dict 纯函数，合法 characterization）；新文件 `tests/test_exports_seal.py`；top 内部 else 分支（breakeven/decomposition/neighbors 缺席）记为接受的残余（substring 冒烟覆盖）。
-- **Q4 A3 表形状**：两级——保留 `x-action == "get_state"` 元数据快路径原样，仅把 6 条全名 if/elif 换 `{name: handler}` dict（handler 为 `(service, args) -> str`），兜底 `已执行 {name}` 不变。action id 跨工具不唯一（forecast/roi 都有 calc），单键表否决。
-- **Q5 C1 模块 API**：`tests/_http.py` 导出 `post(url, obj)` + `post_raw(url, data)`（共享响应处理）+ 三种 GET（get_raw / get_json 抛异常 / get_json_or_error 捕获）；`_post_raw` 不做 isinstance 多态合并。
-- **Q6 C1 范围修正（两行）**：`tests/test_server.py` 的 `_get`（与 get_raw 语义逐字节相同）改 import get_raw；其**抛异常**的 `_post` 保持本地（无人需要的第 4 种语义）。这是对 PRD"三文件"的唯一范围扩展，随本决议批准。
-- **Q7 提交序**：交错式——gate(A1)→A1→gate(A2)→A2→gate(A3)→A3→C1→B1→B2+B3，每个封存对未重构代码可审计先绿（阶段4 先例）。
-- **已钉死无需提问**：B1 配方、B2 三写零读、B3、A1 五块边界（红队已核行号）、FakeHttp 模式、214 基线算术。
+- **Q1 文案统一只报界**：t/f 各一条——"门槛/面额超出可计算范围（约 1.8e308）"（不插值原值，避免 300 位数字串）；范围检查在各自 int 类型检查后、`f<=0` 前。层 1 同族。
+- **Q2 断言深度**：状态码 + 关键子串（超出可计算范围/场景不合法/请求不合法）+ t=10**311 断言 200 且行内 coupon_legality；巨大候选显式带 label。
+- **Q3 stress 丢弃行为说明**：写在 `stress.py` 模块 docstring（代码邻接）。
+- **Q4 单提交**：三层修复 + 9 条矩阵 + route_post docstring 更新一个 `fix(coupon)` 提交（矩阵修复前必红，gate-first 会留红头）。
+- **实现必做（griller 核实）**：两模块 `import sys`；范围检查在 bool/int 检查之后；route_post docstring 同步；红队归因小错修正（new_basket.weight 实崩于 spec.py:232 _check_new_basket，非 engine.py:328，终态同为层 4）。
 
 ### 第 2 轮（主代理）
 

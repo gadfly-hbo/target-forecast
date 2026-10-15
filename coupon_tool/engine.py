@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 
 from .spec import ENGINE_VERSION, ScenarioSpec, SpecError, validate_spec
@@ -113,6 +114,10 @@ def _validate_candidate(candidate: dict):
             raise SpecError("门槛必须是整数分")
         if isinstance(f, bool) or not isinstance(f, int):
             raise SpecError("面额必须是整数分")
+        if abs(t) > sys.float_info.max:
+            raise SpecError("门槛超出可计算范围（约 1.8e308 分）")
+        if abs(f) > sys.float_info.max:
+            raise SpecError("面额超出可计算范围（约 1.8e308 分）")
         if f <= 0:
             raise SpecError("有效券要求 0 < F（面额必须为正整数分）")
         if f >= t:
