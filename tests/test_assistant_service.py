@@ -112,7 +112,7 @@ def test_out_of_scope_action_refused_without_side_effect():
 
 def test_backend_unavailable_raises():
     class DeadBackend:
-        def chat(self, messages, tools):
+        def chat(self, messages, tools, write_names=None):
             raise BackendUnavailable("no key")
 
     svc = AssistantService(build_default_registry(ROOT), DeadBackend(), FakeHttp())
@@ -286,7 +286,7 @@ class OrchestratedBackend:
         self.result = result
         self.calls = 0
 
-    def chat(self, messages, tools):
+    def chat(self, messages, tools, write_names=None):
         self.calls += 1
         return self.result
 

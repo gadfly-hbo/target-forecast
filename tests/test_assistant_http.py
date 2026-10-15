@@ -78,7 +78,7 @@ def test_backend_status(echo_server):
 
 def test_backend_unavailable_503():
     class DeadBackend:
-        def chat(self, messages, tools):
+        def chat(self, messages, tools, write_names=None):
             raise BackendUnavailable("no key configured")
 
     reg = build_default_registry(ROOT)

@@ -14,6 +14,7 @@
  * （uncapped 五元组）；整 run 唯一界限 = 每请求 AbortSignal(140s < Python 150s)；
  * 同 taskId lease 唯一 → 模块级串行队列；audit JSONL 同步落盘（启动时 >5MiB 轮转）。
  */
+import {createHash} from "node:crypto";
 import {createServer, type IncomingMessage, type ServerResponse} from "node:http";
 import {appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync} from "node:fs";
 import {join} from "node:path";
@@ -28,7 +29,12 @@ const MODEL_ID = process.env.WORKBENCH_LLM_MODEL ?? "mimo-v2.6-pro";
 const PROVIDER = "xiaomi-mimo";
 const TIMEOUT_MS = Number(process.env.WORKBENCH_LLM_TIMEOUT_MS ?? 120_000);
 const RUN_SIGNAL_MS = 140_000; // 必须 < Python PiSidecarBackend 150s socket 超时
-const TASK_ID = "workbench-assistant"; // 稳定任务 ID（标准：不可每请求随机）
+// 稳定任务 ID（标准：不可每请求随机）——工具定义参与 config hash，故按
+// 工具集派生后缀：不同工具集 = 不同任务身份（各自台账），同集稳定复用。
+function taskIdFor(tools: OpenAiTool[], writeNames: readonly string[]): string {
+  const defs = tools.map((t) => `${t.function?.name ?? ""}:${writeNames.includes(t.function?.name ?? "") ? "w" : "r"}`).sort().join("|");
+  return `workbench-assistant:${createHash("sha256").update(defs).digest("hex").slice(0, 10)}`;
+}
 
 const modelConfig: ModelConfig = {
   provider: PROVIDER, id: MODEL_ID, protocol: "openai-completions",
@@ -156,7 +162,7 @@ export function createAssistant(deps: AssistantDeps = {}) {
     const collect: ToolCallRecord[] = [];
     try {
       const result: RunResult<string> = await enqueue(() => runtime().runAgent({
-        taskId: TASK_ID,
+        taskId: taskIdFor(body.tools ?? [], body.write_actions ?? []),
         prompt: flatten(body.messages ?? []),
         tools: toSdkTools(body.tools ?? [], body.write_actions ?? [], shellUrl, collect),
         limits: {cumulative: "unlimited", maxOutputTokens: 8_192,
