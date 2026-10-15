@@ -169,11 +169,21 @@ def _per_basket_ok(values, n) -> bool:
 
 
 def _check_behavior(spec: ScenarioSpec) -> list[str]:
+    """行为参数校验——按原有连续代码块分派，errors 顺序即 API 文案（有顺序钉死测试守卫）。"""
     errors: list[str] = []
     h = spec.behavior
     if h is None:
         return ["缺少 behavior"]
     n = len(spec.baseline.baskets)
+    _check_reach_and_churn(h, n, errors)
+    _check_q(h, errors)
+    _check_conversion(h, errors)
+    _check_new_basket(h, errors)
+    return errors
+
+
+def _check_reach_and_churn(h, n: int, errors: list[str]) -> None:
+    """块①②：四名字逐篮子概率 + 新增触达 e⁺（连续块切分：e⁺ 在四名字之后，勿并入领域主题）。"""
     for name in ("reach_base", "redeem_natural", "redeem_topup", "churn"):
         values = getattr(h, name)
         if not _per_basket_ok(values, n):
@@ -183,6 +193,10 @@ def _check_behavior(spec: ScenarioSpec) -> list[str]:
             for i, v in enumerate(vals):
                 _prob(v, f"{name}[{i}]", errors)
     _prob(h.reach_new, "新增触达 e⁺", errors)
+
+
+def _check_q(h, errors: list[str]) -> None:
+    """块③：凑单模式（curve 曲线参数 / table 表非空 / zero）。"""
     if h.q_mode not in ("curve", "table", "zero"):
         errors.append(f"未知凑单模式 {h.q_mode!r}")
     if h.q_mode == "curve":
@@ -194,6 +208,10 @@ def _check_behavior(spec: ScenarioSpec) -> list[str]:
             errors.append("d_ref 必须 > 0")
     if h.q_mode == "table" and not h.q_table:
         errors.append("凑单参数表为空")
+
+
+def _check_conversion(h, errors: list[str]) -> None:
+    """块④：转化响应模式（relative 斜率/上限、absolute 非负 ΔC⁺）。"""
     conv = h.conversion
     if conv.get("mode") == "relative":
         if conv.get("k", 0.9) < 0:
@@ -206,6 +224,10 @@ def _check_behavior(spec: ScenarioSpec) -> list[str]:
             errors.append("绝对 ΔC⁺ 必须为非负数")
     else:
         errors.append(f"未知转化响应模式 {conv.get('mode')!r}")
+
+
+def _check_new_basket(h, errors: list[str]) -> None:
+    """块⑤：新增结果分布 vⱼ（权重合计、逐项金额/核销、缺失）。"""
     wsum = sum(nb.get("weight", 0.0) for nb in h.new_basket)
     if h.new_basket and abs(wsum - 1.0) > 1e-9:
         errors.append(f"新增结果分布 vⱼ 权重合计必须为 1，实际 {wsum:.6f}")
@@ -217,7 +239,6 @@ def _check_behavior(spec: ScenarioSpec) -> list[str]:
             errors.append(f"新增结果[{j}]核销状态必须为 0/1")
     if not h.new_basket:
         errors.append("缺少新增结果分布 vⱼ")
-    return errors
 
 
 def validate_spec(spec: ScenarioSpec) -> dict:
