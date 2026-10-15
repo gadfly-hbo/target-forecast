@@ -153,55 +153,12 @@ class AssistantService:
         name, args = tc["name"], (tc["args"] or {})
         tool = self._by_name[name]["x-tool"]
         action = self._by_name[name]["x-action"]
-        if action == "get_state":
+        if action == "get_state":  # 三工具共享：元数据优先于全名判定
             return _summarize_state(tool, self.http("GET", f"/t/{tool}/api/state", None))
-        if name == "forecast__calc":
-            data = self.http("POST", "/t/forecast/api/calc", {"scenarios": args.get("scenarios") or {}})
-            nets = {r["scenario"]: round(sum(x["GMV_主口径"] for x in data["consolidated"] if x["scenario"] == r["scenario"]), 0)
-                    for r in data["consolidated"]}
-            return "全渠道年化GMV（按情景）：" + "；".join(f"{k} {v:.0f} 元" for k, v in nets.items())
-        if name == "forecast__set_scenario_params":
-            sc, params = args["scenario"], args["params"]
-            self.http("POST", "/t/forecast/api/assistant_params", {"scenarios": {sc: params}})
-            state = self.http("GET", "/t/forecast/api/state", None)
-            saved = self.http("GET", "/t/forecast/api/assistant_params", None)
-            merged = {n: {**p, **(saved.get("scenarios") or {}).get(n, {})} for n, p in state["scenarios"].items()}
-            data = self.http("POST", "/t/forecast/api/calc", {"scenarios": merged})
-            gmv = sum(x["GMV_主口径"] for x in data["consolidated"] if x["scenario"] == sc)
-            return f"挑战情景已保存并重算：年化GMV {gmv:.0f} 元".replace("挑战", sc)
-        if name == "roi__calc":
-            body = {k: args[k] for k in ("plans", "scenarios") if k in args}
-            if "plans" not in body:  # 省略 plans 时用演示计划集
-                body["plans"] = self.http("GET", "/t/roi/api/state", None)["plans"]
-            if "scenarios" not in body:
-                body["scenarios"] = self.http("GET", "/t/roi/api/state", None)["scenarios"]
-            data = self.http("POST", "/t/roi/api/calc", body)
-            return _summarize_roi_calc(data, args)
-        if name == "roi__set_plan_params":
-            plan, params = args["plan"], args["params"]
-            self.http("POST", "/t/roi/api/assistant_params", {"plans": {plan: params}})
-            state = self.http("GET", "/t/roi/api/state", None)
-            saved = self.http("GET", "/t/roi/api/assistant_params", None)
-            plans = []
-            for p in state["plans"]:
-                patch = (saved.get("plans") or {}).get(p["name"], {})
-                plans.append({**p, **patch})
-            data = self.http("POST", "/t/roi/api/calc", {"plans": plans, "scenarios": state["scenarios"]})
-            base = data["scenarios"].get("基准", {})
-            net = next((p["net"] for p in base.get("plans", []) if p["name"] == plan), None)
-            if net is None:
-                return f"计划「{plan}」参数已保存，但基准结果中未找到该计划"
-            return f"计划「{plan}」参数已保存，基准情景净贡献 {net:.2f} 元"
-        if name == "coupon__list_runs":
-            data = self.http("GET", "/t/coupon/api/runs", None)
-            runs = data if isinstance(data, list) else data.get("runs", [])
-            return f"已封存运行 {len(runs)} 个" + (f"：{', '.join(r[:8] for r in runs[:3])}" if runs else "")
-        if name == "coupon__compare":
-            spec = self.http("GET", f"/t/coupon/api/scenario/{args['scenario_id']}", None)
-            data = self.http("POST", "/t/coupon/api/compare", {"scenario": spec})
-            labels = [r["label"] for r in data.get("rows", [])]
-            return f"场景 {args['scenario_id']} 比较完成：{len(labels)} 个候选（含无券基准）"
-        return f"已执行 {name}"
+        handler = _EXECUTORS.get(name)
+        if handler is None:
+            return f"已执行 {name}"
+        return handler(self, args)
 
 
 def _summarize_state(tool: str, data: dict) -> str:
@@ -225,3 +182,73 @@ def _summarize_roi_calc(data: dict, args: dict) -> str:
     n = len(sc.get("plans", []))
     # 裸数字摘要：reply 模板自带上下文语（"合计净贡献为 {summary}"）
     return f"{totals.get('net', 0):.2f} 元（{n} 个计划）"
+
+
+# ---------- action 执行器表（两级分发：x-action 元数据快路径在 AssistantService._execute，此处为全名表） ----------
+
+def _exec_forecast_calc(svc, args):
+    data = svc.http("POST", "/t/forecast/api/calc", {"scenarios": args.get("scenarios") or {}})
+    nets = {r["scenario"]: round(sum(x["GMV_主口径"] for x in data["consolidated"] if x["scenario"] == r["scenario"]), 0)
+            for r in data["consolidated"]}
+    return "全渠道年化GMV（按情景）：" + "；".join(f"{k} {v:.0f} 元" for k, v in nets.items())
+
+
+def _exec_forecast_set_scenario_params(svc, args):
+    sc, params = args["scenario"], args["params"]
+    svc.http("POST", "/t/forecast/api/assistant_params", {"scenarios": {sc: params}})
+    state = svc.http("GET", "/t/forecast/api/state", None)
+    saved = svc.http("GET", "/t/forecast/api/assistant_params", None)
+    merged = {n: {**p, **(saved.get("scenarios") or {}).get(n, {})} for n, p in state["scenarios"].items()}
+    data = svc.http("POST", "/t/forecast/api/calc", {"scenarios": merged})
+    gmv = sum(x["GMV_主口径"] for x in data["consolidated"] if x["scenario"] == sc)
+    return f"挑战情景已保存并重算：年化GMV {gmv:.0f} 元".replace("挑战", sc)
+
+
+def _exec_roi_calc(svc, args):
+    body = {k: args[k] for k in ("plans", "scenarios") if k in args}
+    if "plans" not in body:  # 省略 plans 时用演示计划集
+        body["plans"] = svc.http("GET", "/t/roi/api/state", None)["plans"]
+    if "scenarios" not in body:
+        body["scenarios"] = svc.http("GET", "/t/roi/api/state", None)["scenarios"]
+    data = svc.http("POST", "/t/roi/api/calc", body)
+    return _summarize_roi_calc(data, args)
+
+
+def _exec_roi_set_plan_params(svc, args):
+    plan, params = args["plan"], args["params"]
+    svc.http("POST", "/t/roi/api/assistant_params", {"plans": {plan: params}})
+    state = svc.http("GET", "/t/roi/api/state", None)
+    saved = svc.http("GET", "/t/roi/api/assistant_params", None)
+    plans = []
+    for p in state["plans"]:
+        patch = (saved.get("plans") or {}).get(p["name"], {})
+        plans.append({**p, **patch})
+    data = svc.http("POST", "/t/roi/api/calc", {"plans": plans, "scenarios": state["scenarios"]})
+    base = data["scenarios"].get("基准", {})
+    net = next((p["net"] for p in base.get("plans", []) if p["name"] == plan), None)
+    if net is None:
+        return f"计划「{plan}」参数已保存，但基准结果中未找到该计划"
+    return f"计划「{plan}」参数已保存，基准情景净贡献 {net:.2f} 元"
+
+
+def _exec_coupon_list_runs(svc, args):
+    data = svc.http("GET", "/t/coupon/api/runs", None)
+    runs = data if isinstance(data, list) else data.get("runs", [])
+    return f"已封存运行 {len(runs)} 个" + (f"：{', '.join(r[:8] for r in runs[:3])}" if runs else "")
+
+
+def _exec_coupon_compare(svc, args):
+    spec = svc.http("GET", f"/t/coupon/api/scenario/{args['scenario_id']}", None)
+    data = svc.http("POST", "/t/coupon/api/compare", {"scenario": spec})
+    labels = [r["label"] for r in data.get("rows", [])]
+    return f"场景 {args['scenario_id']} 比较完成：{len(labels)} 个候选（含无券基准）"
+
+
+_EXECUTORS = {
+    "forecast__calc": _exec_forecast_calc,
+    "forecast__set_scenario_params": _exec_forecast_set_scenario_params,
+    "roi__calc": _exec_roi_calc,
+    "roi__set_plan_params": _exec_roi_set_plan_params,
+    "coupon__list_runs": _exec_coupon_list_runs,
+    "coupon__compare": _exec_coupon_compare,
+}
