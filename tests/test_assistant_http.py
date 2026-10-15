@@ -178,3 +178,42 @@ def roi_shell_url(tmp_path_factory):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
+
+
+def test_sidecar_backend_parses_orchestrated():
+    """REVIEW B1 回归：PiSidecarBackend 必须解析 orchestrated 与透传字段
+    （否则真实路径落回旧循环=双登记）。"""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from workbench.assistant.backend import PiSidecarBackend
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n))
+            assert body["write_actions"] == ["roi__set_plan_params"]  # 私有协议透传
+            payload = {"reply": "已登记，请确认", "orchestrated": True,
+                       "tool_calls": [{"name": "roi__set_plan_params", "args": {"plan": "P"},
+                                       "summary": "写提案已登记", "stage_pending": True,
+                                       "call_id": "cid-9", "preview": "cvr → 0.05"}]}
+            data = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        backend = PiSidecarBackend(f"http://127.0.0.1:{httpd.server_address[1]}")
+        result = backend.chat([{"role": "user", "content": "hi"}], [{"type": "function", "function": {"name": "f"}}],
+                              write_names={"roi__set_plan_params"})
+        assert result.orchestrated is True
+        tc = result.tool_calls[0]
+        assert tc["stage_pending"] is True and tc["call_id"] == "cid-9" and tc["summary"] == "写提案已登记"
+    finally:
+        httpd.shutdown()

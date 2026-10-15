@@ -57,7 +57,8 @@ class EchoBackend:
 
 
 class PiSidecarBackend:
-    """pi-ai Node sidecar 代理（8321）：真身是 @earendil-works/pi-ai 驱动的小米 MIMO。"""
+    """pi-agent-runtime Node sidecar 代理（8321）：runAgent 全托管工具循环，
+    响应自带 orchestrated=True 与工具执行摘要透传（写项带 stage_pending/call_id）。"""
 
     def __init__(self, base_url: str = "http://127.0.0.1:8321", timeout: int = 150):
         self.url = base_url.rstrip("/")
@@ -86,8 +87,8 @@ class PiSidecarBackend:
         except Exception as exc:  # noqa: BLE001
             raise BackendUnavailable(f"pi sidecar 不可达：{exc}") from exc
         return ChatResult(reply=data.get("reply") or "",
-                          tool_calls=[{"name": tc["name"], "args": tc.get("args") or {}}
-                                      for tc in data.get("tool_calls") or []])
+                          tool_calls=list(data.get("tool_calls") or []),
+                          orchestrated=bool(data.get("orchestrated")))
 
 
 class OpenAiCompatBackend:
