@@ -1,55 +1,56 @@
-# 提案（讨论稿）：target-forecast 仓库重构 — 阶段2
+# 提案（讨论稿）：target-forecast 仓库重构 — 阶段3
 
-> 来源：2026-10-15 会话中基于 codebase-memory 图谱分析输出的重构方案。本 flow 只执行**阶段2**。
-> 阶段1（httpkit 收敛）已完成并推送（5ed0651），产物归档于 `.flow/archive/2026-10-15-stage1-httpkit/`。
+> 来源：2026-10-15 会话中基于 codebase-memory 图谱分析输出的重构方案。本 flow 只执行**阶段3**。
+> 阶段1（httpkit 收敛，5ed0651）、阶段2（pipeline 收敛，d58e3fc）已完成推送，产物归档于 `.flow/archive/2026-10-15-stage{1,2}-*/`。
 
 ## 一句话目标
 
-阶段2：P0 target_forecast pipeline 收敛——消除 `main.py` 与 `target_forecast/server.py` 之间的业务逻辑双份（汇总/scan/load_cfg），两处调用方变成薄壳。
+阶段3：P1 coupon_tool server 路由表化——`route_post`（圈复杂度 29 / 认知复杂度 105，全仓库最高）与 `route_get`（21/56）改为路由表分发 + 每路由一个 handler 函数，行为不变。
 
-## 背景与证据（逐行比对确认）
+## 背景与证据（图谱复杂度 + 逐行读码确认）
 
-`main.py`（CLI 入口）与 `target_forecast/server.py`（工作台 calc）维护着同一段业务逻辑的两份拷贝，改汇总口径要改两次，是真实的 bug 温床：
+`coupon_tool/server.py` 的 route_post 是全仓库复杂度最高的函数。问题不止长，而是有明确的重复骨架：
 
-| 重复逻辑 | main.py | target_forecast/server.py |
-|---|---|---|
-| `load_cfg`（读 config.yaml） | `main.py:27-29` | `server.py:32-34`（`load_cfg(root)`） |
-| 输入扫描（glob *.xlsx 排除 ~$） | `main.py:32-35` `_collect_inputs` | `server.py:37-40` `_scan`（被 `WorkbenchState.load` 用） |
-| 模式A/B ingest+engine 循环 | `main.py:47-61`（run_flow 内联） | `server.py:65-77`（`WorkbenchState.load` 内联） |
-| 三视角 concat + consolidate + platform_annual | `main.py:64-77` | `server.py:132-147`（`calc()` 内联） |
+- `load_spec` + `SpecError→422` 出现 3 次（compare / stress / run）
+- "缺参数→422" 出现 3 次（review 的 run_id 检查、decision 的 run_id 检查等）
+- 8 个 POST 路由分支 + 2 个 GET 正则路由全部内联在一个 if/elif 链里
+- `with app.lock` 粒度不一（demo 只包 save_spec，run 包住整个封存+导出）
 
-两者有一处**结构性差异**：main.py 的 results 含 `unified`（写中间指标 CSV 用），server 的 platforms dict 存 `unified`/`structure` 原始数据、`calc()` 时才算引擎——即 main.py 是"ingest+算+写盘"一次性流程，server 是"ingest 缓存 + 按需 calc"两段式。收敛方案必须容纳这两种用法。
+## 阶段3 方案（原话收敛）
 
-## 阶段2 方案（原话收敛）
+- 改为路由表 + 每路由一个 handler 函数：
 
-- 在 `target_forecast/aggregate.py`（或新 `pipeline.py`）提取：
-  - `scan_inputs(root) -> (detail, agg)`
-  - `run_platforms(detail, agg, cfg) -> results`（模式 A/B 的 ingest+engine 循环，main.py 和 `WorkbenchState.load` 共用）
-  - `build_views(results) -> dict`（concat + consolidate + platform_annual + check/goods sheet）
-- `main.py run_flow` 和 `server.calc` 都变成薄壳。注意保留 main.py 的进度打印（可传回调）。
-- 验证：`pytest tests/test_core.py` + 手动 `main.py demo` 对比输出。
+  ```python
+  def _h_compare(app, r, body): ...
+  def _h_run(app, r, body): ...
+  POST_ROUTES = {"/api/compare": _h_compare, "/api/run": _h_run, ...}
+  ```
+
+- 公共的 `load_spec_or_422` 提取一次。`route_get`（21/56）同样处理。
+- 这是纯机械重构，行为不变，现有 `test_coupon_server.py` 全覆盖。
+- 验证：`pytest tests/test_coupon_server.py`。
 
 ## 硬约束（不可推翻）
 
-1. 不引入 Web 框架或非标准库依赖（沿用上一轮红队结论与 README）。
-2. 不动三个引擎的数学公式（`.flow/archive/2026-09-27-assistant-p3/` 的 proposal 为规格来源）。
-3. 全程 `pytest` 保持绿；行为（控制台输出、API 响应、落盘文件）除明确记录外零变化。
+1. 不引入 Web 框架或非标准库依赖（沿用既定红队结论与 README）。
+2. 不动 coupon 引擎的数学公式（`.flow/archive/2026-09-27-assistant-p3/proposal.md` 为规格来源）。
+3. 全程 `pytest` 保持绿；**HTTP 行为零变化**（路径、状态码、响应体、锁粒度语义）。
 4. 保留用户已有改动（本次开工时工作区干净，baseline_dirty=[]）。
-5. 阶段1 的 httpkit 成果（tools_common）不回退。
+5. 阶段1/2 成果（tools_common/httpkit、target_forecast/pipeline）不回退；coupon server 已切换到 httpkit 的事实保持。
 
 ## 后续阶段（不在本 flow 范围，仅记录）
 
-- 阶段3：P1 coupon server 路由表化（route_post 圈复杂度 29/认知 105）
-- 阶段4：P2 coupon engine.simulate 拆分（33/54）
-- 阶段5：P2 其余 + P3 测试 helper 去重
+- 阶段4：P2 coupon engine.simulate 拆分（33/54；只搬移不改算术）
+- 阶段5：P2 其余（spec._check_behavior 19/31、exports.export_markdown 15/31、assistant service._execute 11/15）+ P3 测试 helper 去重
 
 ## 已拒绝的替代
 
-- 把 server 改成调 main.py 的子进程：引入进程边界，违背本地一体化设计。
-- 顺手重构 engine/aggregate 内部：超出阶段2范围。
+- 引入 Flask/FastAPI 路由装饰器：违反约束 1。
+- 顺手重构 coupon_tool 其他模块（spec/compare/exports）：超出阶段3范围，留阶段5。
 
 ## 开放问题
 
-- 提取目标是放进现有 `aggregate.py` 还是新建 `pipeline.py`？（ingest 循环不算"aggregate"语义）
-- server 两段式（缓存 ingest、按需 calc）与 main.py 一段式（ingest+算+写盘）的统一程度：`run_platforms` 返回到哪一层（unified/structure 还是算完的 results）？
-- main.py 进度打印与警告捕获（`warnings.catch_warnings`）如何穿过共用层。
+- 路由表键是否含 GET 的正则路由（`/api/scenario/{id}`、`/api/run/{id}`、`/api/export/{id}/{kind}`）——正则路由通常需要单独的匹配层，是否值得表化？
+- handler 签名统一为 `(app, r, body) -> bool` 还是 GET/POST 分开两套签名？
+- `with app.lock` 的粒度：保持每路由现状（最保守）还是统一提取（属行为变化风险）？
+- 壳插件（plugin.py 的 handle_get/handle_post 闭包）与独立 make_handler 是否受影响（预期不受——route_get/route_post 签名不变）。

@@ -38,6 +38,85 @@ def _post(url, obj):
         return e.code, json.loads(e.read())
 
 
+def _post_raw(url, data: bytes):
+    req = urllib.request.Request(url, data=data,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def _get_json(url):
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+# ---------- 路由表化前的盲区 characterization（阶段3，行为冻结基线） ----------
+
+def test_demo_ignores_malformed_body(base_url):
+    # /api/demo 从不读 body：畸形 JSON 仍 200（预读 body 会把它变成 422）
+    status, out = _post_raw(base_url + "/api/demo", b"not-json")
+    assert status == 200 and out["scenario_id"] == "coupon-demo-001"
+
+
+def test_import_buckets_route(base_url):
+    rows = [{"bucket_min_cents": 6000, "bucket_max_cents": 8999, "avg_amount_cents": 7500,
+             "orders": 200, "avg_margin_rate": 0.30},
+            {"bucket_min_cents": 9000, "bucket_max_cents": 12999, "avg_amount_cents": 11000,
+             "orders": 300, "avg_margin_rate": 0.30}]
+    status, out = _post(base_url + "/api/import", {"mode": "buckets", "rows": rows})
+    assert status == 200 and out["row_count"] == 2 and out["issues"] == []
+    assert set(out["baskets"][0]) == {"amount_cents", "weight", "margin_rate", "label",
+                                      "bucket_min_cents", "bucket_max_cents"}
+
+
+def test_import_orders_route(base_url):
+    rows = [{"order_id": "o1", "amount_cents": 9900, "margin_cents": 3000, "refunded": 0}]
+    status, out = _post(base_url + "/api/import", {"mode": "orders", "rows": rows})
+    assert status == 200 and out["row_count"] == 1
+
+
+def test_decision_route_validation_and_save(base_url):
+    status, out = _post(base_url + "/api/decision", {})
+    assert status == 422 and out == {"error": "缺少 run_id"}
+    status, out = _post(base_url + "/api/decision",
+                        {"run_id": "run-char", "choice": "无券基准", "confirmed_by": "t"})
+    assert status == 200 and out["saved"].endswith("run-char.json")
+
+
+def test_review_list_route(base_url):
+    status, out = _get_json(base_url + "/api/review/list")
+    assert status == 200 and "reviewed_runs" in out
+
+
+def test_scenario_not_found_error_body(base_url):
+    # 命中 scenario 正则但场景不存在 → 404 且 error 为 store/SpecError 文案（非 "not found"）
+    status, out = _get_json(base_url + "/api/scenario/nonexistent-xyz")
+    assert status == 404 and out["error"] != "not found"
+
+
+def test_export_invalid_kind_404(base_url):
+    status, out = _get_json(base_url + "/api/export/some-run/bogus")
+    assert status == 404 and out == {"error": "not found"}
+
+
+def test_compare_engine_deep_specerror_no_prefix(base_url):
+    # load_spec 过、compare 内部抛（均衡模式缺 scale）→ 外层 catch：422 且无"场景不合法"前缀
+    _, demo = _post(base_url + "/api/demo", {})
+    scenario = demo["scenario"]
+    scenario["objective"] = "balanced"
+    scenario["objective_params"] = {}
+    status, out = _post(base_url + "/api/compare", {"scenario": scenario})
+    assert status == 422
+    assert not out["error"].startswith("场景不合法")
+    assert "profit_scale" in out["error"]
+
+
 def test_static_pages(base_url):
     status, html = _get(base_url + "/")
     assert status == 200 and "优惠券测算工作台" in html.decode()

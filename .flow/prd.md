@@ -1,82 +1,81 @@
-# PRD：重构阶段2 — target_forecast pipeline 收敛
+# PRD：重构阶段3 — coupon_tool server 路由表化
 
-> 规格来源：`.flow/proposal.md`。红队报告：`.flow/red-team.md`（GO，三个开工前修订已全部采纳进本 PRD）。
+> 规格来源：`.flow/proposal.md`。红队报告：`.flow/red-team.md`（GO，三个开工前条件；**内联降级模式**——子代理配额不可用）。
 
 ## Problem Statement
 
-`main.py`（CLI 一次性流程）与 `target_forecast/server.py`（工作台缓存+懒算）维护同一段业务逻辑的两份拷贝：config 加载、输入扫描、模式 A/B ingest 循环、三视角 concat 汇总。改汇总口径要改两处且必然漂移；红队实测确认其中一处（`cfg["caliber"]` 原地变异喂给报表 07_参数 sheet）已经是"靠副作用才正确"的脆弱状态。
+`coupon_tool/server.py` 的 `route_post`（圈复杂度 29 / 认知 105，全仓库最高）与 `route_get`（21/56）把 18 条路由内联在两个 if/elif 链里，混着重复骨架（3×`load_spec`+SpecError 422、3×缺参 422）、按路由不均质的异常处理与锁粒度。新增一条路由要在 60 行的链里找位置，异常语义靠缩进层级表达，无法一眼审计"哪条路由捕获什么异常、锁到哪里"。
 
 ## Solution
 
-在 `target_forecast/` 内新建 `pipeline.py`，提取四个共用函数，两个调用方（main.py CLI、server.py WorkbenchState/calc）变成薄壳；server.py 的公开符号（`load_cfg`/`WorkbenchState`/`route_*`/`make_handler`/`serve`）保持不变，壳插件与测试零改动。
+改为**两段式路由表**（精确匹配表 + 顺序正则表）+ 每路由一个 handler 函数；HTTP 行为零变化——路径、状态码、响应体（含错误文案）、锁粒度、异常吞噬范围逐条保持现状。
 
 ## User Stories
 
-1. As a 维护者，I want 输入扫描（glob xlsx 排除 ~$）只有一份实现，so that 改输入约定只改一处
-2. As a 维护者，I want 模式 A/B 的 ingest 循环只有一份实现，so that 新增 ingest 模式不会只在一端生效
-3. As a 维护者，I want 三视角 concat + consolidate + platform_annual 只有一份实现，so that 汇总口径永远一致
-4. As a 维护者，I want server 的"缓存 ingest、按需 calc"两段式不被破坏，so that `/api/state` 不需要跑引擎、`reload=1` 的失败面不扩大
-5. As a 维护者，I want main.py 的逐平台进度打印与警告回放逐字节不变，so that CLI 用户体验零漂移
-6. As a 维护者，I want `main.py run` 落盘的 xlsx 07_参数 sheet 保留 target_months 行，so that 报表内容零漂移
-7. As a 维护者，I want 空输入策略分叉保留在两壳（main.py sys.exit / server 自动生成 demo），so that 两个入口的既定语义不变
-8. As a 审查者，I want 固定输入下的基线 diff（控制台 + CSV + xlsx 逐 sheet），so that "零漂移"是可证伪的断言而非口头承诺
+1. As a 维护者，I want 每条路由是一个命名函数，so that 新增路由不改动既有分支
+2. As a 维护者，I want 异常→状态码→文案的映射按路由显式可见，so that "哪条路由吞什么异常"可审计
+3. As a 维护者，I want 锁块与业务语句的绑定关系在重构后逐字节不变，so that run 路由的封存原子性不被破坏
+4. As a 维护者，I want 复杂度显著下降（route_post 认知 105 → 各 handler 个位数），so that review 与定位成本下降
+5. As a 审查者，I want 重构前补齐盲区 characterization 测试，so that "行为零变化"可证伪
+6. As a 壳用户，I want route_get/route_post 的公开签名不变，so that plugin.py 与独立 make_handler 零改动
 
 ## Implementation Decisions
 
-1. **新建 `target_forecast/pipeline.py`**（红队口径：放 aggregate.py 还是新模块无正确性差异；新建 pipeline.py 语义最准——ingest 编排不是 aggregate）。四件套：
-   - `scan_inputs(root) -> (detail, agg)`：两目录 glob `*.xlsx` 排除 `~$`。只扫描，不含空输入策略（分叉留在调用方）。
-   - `ingest_platforms(detail, agg, caliber, on_progress=None) -> platforms`：模式 A（load_detail→classify_new→order_level→to_unified→goods_structure）与模式 B（load_agg→to_unified）循环；**只 ingest 不算引擎**。`on_progress(platform, mode, unified)` 回调供 main.py 进度打印（点位与现状咬合顺序一致）。返回 `{platform: {"mode", "unified", "structure"}}`——正是 server 缓存的形状。
-   - `run_engine(platforms, scenarios, caliber) -> results`：逐平台 `engine.run`，返回 `{platform: {"mode", "unified", **engine.run(...)}}`——正是 main.py run_flow 内 results 的形状。
-   - `build_views(results) -> dict`：三视角 concat（main_view 选择）+ baselines + `aggregate.consolidate` + `aggregate.platform_annual` + `report._build_check_sheet` + `report._build_goods_sheet`，返回 main.py 与 server.calc 都消费的字典。
-2. **`cfg["caliber"]` 原地变异显式保留在 main.py 壳**：`run_flow` 开头继续 `cfg["caliber"]["target_months"] = cfg["target"]["months"]`（红队实测：write_report 的 07_参数 sheet 遍历 `cfg["caliber"]`，该行靠此副作用存在）。server.calc 保持拷贝式（`{**cfg["caliber"], ...}`）不动。此不对称在 pipeline.py docstring 中记录原因。
-3. **main.py 薄壳**：`_collect_inputs` 删除改调 `scan_inputs`；`load_cfg` 删除改 import server 的（server.load_cfg 保留原位，plugin.py 与测试 import 不变）；run_flow = scan → 空输入 sys.exit（保留）→ caliber 变异 → ingest_platforms(on_progress=打印) → run_engine → build_views → 写 CSV/报表 → 控制台摘要。`warnings.catch_warnings` 包裹保持在 main() 现状位置，共用层不得含 warnings 过滤。
-4. **server.py 薄壳**：`WorkbenchState.load` 的扫描+循环改调 `scan_inputs` + `ingest_platforms`（demo 自生成与 `demo_used` 逻辑保留在 load 内原位）；`calc()` 的引擎循环改调 `run_engine`，汇总段改调 `build_views`。公开符号签名全部不变。
-5. **目标表述修正**（红队"What I Couldn't Assess"）：report.py 内 `write_report` 还有第三份 concat 拷贝（report.py:77-86），本阶段不动它——目标精确化为"**调用方薄壳化**"，不是"全仓库 concat 只剩一份"。
-6. **零行为漂移清单**（除以下外不允许任何差异）：无 deliberate-change——本阶段要求行为逐字节等价。
+1. **两段式路由表**（红队条件③）：
+   - `POST_ROUTES: dict[str, handler]`——8 条精确路由
+   - GET 侧：`GET_EXACT: dict[str, handler]`（`/`、`/style.css`、`/app.js`、`/api/state`、`/api/review/list`、`/api/runs`、`/api/templates`）+ `GET_PATTERNS: list[tuple[compiled_regex, handler]]`（scenario/{id}、run/{id}、export/{id}/{kind}，**保持现状顺序**）
+   - handler 签名：GET 为 `(app, r, path) -> None`（正则 handler 接收 match 对象：`(app, r, m) -> None`）；POST 为 `(app, r) -> None`——**body 由各 handler 自读**（红队条件②），无统一预读
+   - `route_get`/`route_post` 保持现有签名 `(app, h, path) -> bool`，函数体变为查表分发；未命中返回 False
+2. **异常包裹保持现状形状**：`route_post` 的外层 `except SpecError → 422 str(exc)` 与 `except (ValueError, KeyError, TypeError) → 422 "请求不合法：{exc}"` 继续罩住**整个 POST 分发**（含表查找后的 handler 调用）；compare/stress/run 的内层 `load_spec` 短路（422 + "场景不合法：{exc}" 前缀 + return）提取为 `_load_spec_or_422(r, body) -> spec | None` 私有助手，**仅用于这三条路由的 load_spec 处**；`/api/review` 的内层 `(ValueError, FileNotFoundError, SpecError)` catch 原样留在其 handler 内；FileNotFoundError 不进外层 catch。
+3. **锁块随 handler 原样搬移**（红队 kill 准则 3）：demo 锁 save_spec、run 锁整个封存+导出、export 不锁、scenario/{id} 锁 load……逐路由与现状逐语句对齐。
+4. **正则 handler 的 404 语义**：scenario/{id} 的 `(FileNotFoundError, SpecError) → 404 str(exc)`、run/{id} 的 `FileNotFoundError → 404 "run not found"`、export 的缺失文件 404 与非法 kind 不匹配（落到未命中 → make_dispatch_handler 404 "not found"）全部保持。
+5. **不做**：不引入装饰器注册器、不动 make_handler/plugin.py/serve、不动响应体字段顺序、不改 `_Responder` 用法、不重构 spec/compare 等其他模块（阶段5 范围）。
+6. **零 deliberate-change**：本阶段要求行为逐字节等价。
 
 ## Testing Decisions
 
-- 好测试 = 固定输入下的可证伪对比；本阶段以"基线 diff"为主验证（重构是等价变换）。
-- **开工前先建基线**（红队修订①，因 demo 种子 `hash(platform)` 跨进程随机、test_core.py 不覆盖编排层）：
-  1. 当前 `workspace/forecast/` 已有固定输入文件——重构前跑 `main.py run`，保存控制台输出、`中间指标/*.csv` 快照、xlsx 逐 sheet pandas 快照（含 07_参数 sheet；xlsx 有 datetime 时间戳不能字节比）
-  2. 重构后同样跑 `main.py run`，控制台 diff 必须逐字节相等、CSV `diff -r` 相等、xlsx 逐 sheet `assert_frame_equal`
-- 全量 `pytest`（不是单文件）：test_core（引擎数学不变量）+ test_server（main_view/consolidated 形状/参数效应）+ test_workbench 切片3（壳内 forecast 全链路）+ test_httpkit_characterization（load_cfg/WorkbenchState fixtures）
-- 新增一条编排层测试（`tests/test_pipeline.py`）：用 tmp 合成的最小输入跑 scan_inputs/ingest_platforms/run_engine/build_views 四件套，断言形状与关键不变量（防止未来再长出第三份拷贝）
-- 空输入分叉冒烟：tmp 空目录下 `main.py run` 应 exit 报错；server `WorkbenchState.load` 应 demo_used=True
+- **动工前补盲区 characterization**（红队条件①，加进 `tests/test_coupon_server.py`，先对现状绿）：
+  1. POST /api/demo 带 `b"not-json"` body → 200（无预读怪癖）
+  2. /api/import buckets 模式 happy path → 200 issues/baskets 结构
+  3. /api/import orders 模式（或非法 mode 回退 orders）→ 200
+  4. POST /api/decision 缺 run_id → 422；happy path → 200 {"saved": ...}
+  5. GET /api/review/list → 200 {"reviewed_runs": [...]}
+  6. GET /api/scenario/nonexistent → 404 且 error 为 store/SpecError 文案（非 "not found"）
+  7. GET /api/export/x/bogus → 404 {"error": "not found"}
+  8. POST /api/compare 引擎深处 SpecError（如候选不合法）→ 422 无"场景不合法"前缀（外层路径）
+- 回归：`pytest tests/test_coupon_server.py tests/test_coupon_cli.py` + 全量 `pytest`
+- 完成后用图谱复查复杂度（route_post 拆分后各 handler 认知复杂度应全部 ≤ 15）
 
 ## Out of Scope
 
-- engine / aggregate / report 内部数学与报表布局
-- report.py 内第三份 concat 拷贝（见决策 5）
-- demo.py 种子不确定性（记录为已知事实，不修——修它属于行为变化）
-- coupon_tool / roi_tool / workbench 壳
-- 阶段3-5
-
-## Further Notes
-
-- 阶段1 产物（tools_common/httpkit）已就位，本阶段不涉及 HTTP 层。
+- coupon_tool 其他模块（spec/compare/exports/review/stress）——阶段4/5
+- workbench 壳、roi/forecast server——阶段1 已收敛
+- route_get 的静态三分支合并进 httpkit（现状即 r.static 调用，无收益）
 
 ## PRD diff gate（相对 proposal.md 的差异）
 
 proposal 硬约束全部保留。差异点：
 
-1. **函数清单修正**（proposal 开放问题 2 的收敛）：`run_platforms`（ingest+engine 合一）→ 四件套 `scan_inputs / ingest_platforms / run_engine / build_views`，server.load 只共享 ingest 半段。（红队条件③，证据：server 两段式缓存）
-2. **提取目标拍板**：新建 `pipeline.py`（proposal 开放问题 1；红队：无正确性差异，语义优先）。
-3. **caliber 原地变异**（proposal 未提）：显式保留在 main.py 壳并记录原因。（红队条件②，07_参数 sheet 的 load-bearing 副作用）
-4. **验证条款重写**：固定输入基线 diff（控制台字节级 + CSV + xlsx 逐 sheet）+ 全量 pytest，替换"test_core.py + 手动 demo 对比"。（红队条件①，demo 种子跨进程随机）
-5. **目标表述修正**：从"消除双份"精确化为"调用方薄壳化"（report.py 内第三份 concat 本阶段不动）。
-6. **新增**：空输入策略分叉显式留在两壳（红队 kill-assumption 5b）；plugin.py 为第三消费面，server.py 公开面不变（5a）。
+1. **开放问题 1 拍板**：正则路由用**有序正则表**（GET_PATTERNS），与精确表两段并存——非单一 dict（红队条件③）。
+2. **开放问题 2 拍板**：GET 与 POST 两套 handler 签名；POST 为 `(app, r)`，**body 各 handler 自读**——非统一 `(app, r, body)`（红队发现 1：统一预读改 /api/demo 行为）。
+3. **开放问题 3 拍板**：锁粒度**保持每路由现状**，统一提取方案否决（红队发现 3）。
+4. **新增**：动工前补 8 条盲区 characterization（红队发现 5：/api/import 等零覆盖）。
+5. **新增**：异常语义逐路由保持的显式清单（决策 2：外层罩分发、内层前缀短路仅限三路由、review 内层三异常、FileNotFoundError 不外抛吞噬）。
 
 ---
 
 ## GRILL 决议
 
-### 第 1 轮（author-blind 子代理，2026-10-15，6 个已决问题包）
+### 第 1 轮（内联降级模式——子代理配额 403，2026-10-15，6 个已决问题包）
 
-- **Q1（修订决策 1/3）进度打印**：删除 `on_progress` 回调设计。main.py 壳在 `run_engine` 之后按 results 插入序逐平台补打整行（`[{p}] 模式X … 历史 {min}~{max} 共{n}月 · 主口径[{main_view}]`），字节流与现状相等。依据：现状"实时进度"是幻觉（`end=" "` 无 flush，管道块缓冲）；`main_view` 来自 engine.run 返回，ingest 期物理上不可得。警告回放不受拆分影响（全链路唯一 warn 在 ingest_agg.to_unified，基线数据下为死代码）。备选 (c) 单平台原语推翻四件套 API，否决。
-- **Q2 build_views 返回键钉死**：返回且仅返回 `{"consolidated", "platform_annual", "check", "goods", "baselines"}`。calc 组装段变纯挑键；main.py 的 `baselines` 也从返回值取（避免第四次派生）。不返回 `*_all` 中间帧（无壳内消费者；write_report 内部自做 concat，已钉不动）。
-- **Q3 xlsx 对比掩码**：00_说明 sheet 的 `生成时间：…` 单元格（分钟精度）读入后正则归一化再 `assert_frame_equal`；其余 7 个 sheet（含 07_参数的 target_months 行）verbatim 对比。这是对比窗口归一化，非 deliberate-change。
-- **Q4 基线快照位置**：`workspace/baseline-stage2/`（gitignored、持久、贴数据；不进 `.flow/` 因其受版本控制且快照含业务数据衍生物）。流程：改前 `main.py run > workspace/baseline-stage2/console.before.txt 2> console.before.err` + 复制 `中间指标/` 与 xlsx；改后同法得 after；stdout/stderr 分开 diff、CSV `diff -r`、xlsx 带掩码对比。不钉 PYTHONHASHSEED（run 路径无 hash 依赖）。
-- **Q5 test_pipeline.py 合成方式**：手写最小 xlsx（不跑 demo.generate）——模式 A 必填仅 5 列（schema.py:7）、模式 B 必填 6 列（schema.py:11，加 UV 触发场视角）；engine 容忍 <12 月历史。一个模式 A 平台 + 一个带 UV 的模式 B 平台，断言：scan 排除 `~$`/缺目录返 `{}`；ingest 返回 `{mode, unified, structure}` 且 B 的 structure 为 None；run_engine 并入 engine.run 六键且保持插入序；build_views 五键、consolidated 行数=情景数×target_months。另加 AST 守卫（先例：test_httpkit_characterization.py）：main.py 不再定义 `_collect_inputs`、server.py 不再定义 `_scan`、两者都 import pipeline。
-- **Q6 空输入分叉冒烟自动化进 pytest**：main 侧 `monkeypatch.setattr(main, "ROOT", tmp_path)` + `pytest.raises(SystemExit)` 调 run_flow（首个 import main 的测试，已确认 main() 在 `__main__` 守卫内，import 安全）；server 侧 `WorkbenchState(tmp_path, cfg["caliber"]).load()` → demo_used is True 且 platforms 非空。AST 守卫顺带钉住"scan_inputs 不吸收 sys.exit/demo 自生成"。
-- **已钉死无需提问**：caliber 变异不对称（决策 2，证据链闭合）；四件套返回形状与两侧消费面逐键对上；calc 拷贝式 caliber 与 run_engine 交互（engine/ingest 对 caliber 只读）；load_cfg 收敛（server.load_cfg 原位保留，无 main.load_cfg 消费者）；warnings 过滤不进共用层；report.py 第三份 concat 不动；server 公开符号冻结。
+- **Q1 `_load_spec_or_422` 助手形态**：`(r, body) -> ScenarioSpec | None`——内层 try 捕 SpecError → `r.json({"error": f"场景不合法：{exc}"}, 422)` → 返回 None；compare/stress/run 三路由调用后 `if spec is None: return`。证据：server.py:169-175 现状短路形状。
+- **Q2 表的位置与命名**：handler 私有名 `_h_<route>`（如 `_h_compare`）；`POST_ROUTES` / `GET_EXACT` / `GET_PATTERNS` 为模块级常量，定义在 handler 之后、route_get/route_post 之前；模块 docstring 补一行表结构说明。
+- **Q3 characterization 8（外层无前缀 422）触发方式**：demo 场景 + 破坏一个 enabled 候选（`threshold_cents=100, face_value_cents=200`）——`load_spec` 的 `validate_spec` 只查 semantics/cost/behavior 不查候选（spec.py:223-233），候选合法性在 `engine.simulate`（engine.py:112-119）——故 load_spec 通过、compare 内 simulate 抛 SpecError → 外层 except → 422 `str(exc)` 无前缀。
+- **Q4 characterization 落点**：追加到 `tests/test_coupon_server.py`（复用既有 base_url fixture），不新建文件。
+- **Q5 GET 侧无外层 try**：现状 route_get 没有 broad except（与 POST 不同）——保持，不给 GET 加。
+- **Q6 复杂度复查方式**：用 codebase-memory 图谱 query_graph 按文件过滤复查拆分后各 handler 的 cyclomatic/cognitive（阶段1 已验证该字段可用）。
+- **无需提问已钉死**：route_get/route_post 签名冻结（plugin 依赖）；make_handler/serve 不动；错误响应体字段顺序不动。
+
+### 第 2 轮（主代理）
+
+枚举零新增开放问题——**GRILL converged after 2 rounds**。
