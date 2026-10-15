@@ -1,42 +1,30 @@
-# REVIEW 发现（阶段3，2026-10-15）
+# REVIEW 发现（阶段4，2026-10-15，fresh-context 子代理——配额已恢复）
 
-> **降级模式声明**：子代理配额（403）在本阶段全程未恢复（红队、GRILL 第1轮、REVIEW 三处均降级内联）。REVIEW 由主代理按 matt-code-review 两轴内联执行：独立复跑验证命令、逐点对照 `git show cc3d40a:coupon_tool/server.py` 的旧 if/elif 链与新表实现。对抗距离弱于 fresh-context，DONE 摘要披露。
+## Verdict: **PASS**（0 blocking；3 non-blocking）
 
-## Verdict: **PASS**（无 blocking 发现；2 条 non-blocking）
+## 独立验证（审查者自带沙箱复核）
 
-## VERIFY 证据复核——无不一致
+| 声明 | 复核结果 |
+|---|---|
+| 全量 214 passed | 214 passed in 97.72s, exit 0 |
+| 指纹 19 passed | 19 passed in 0.04s |
+| 封存时引擎未重构 | **实证**：沙箱内 `git show 454c537` 的旧引擎复现全部 19 个 EXPECTED digest + 12 个红队前缀 |
+| 跨重构逐位一致 | 旧引擎 19/19、新引擎 19/19 → 输出逐位相同（不信任 flow 自述的独立证明） |
+| SANITY 守卫真实触发 | 5/5 退化构造使断言翻 False（防退化 battery 是活的） |
+| 语句级等价 | AST multiset diff：全部 delta 为纯接线/逐字搬移；**无任何运算符/常数/操作数序变化** |
 
-复跑 `.venv/bin/python -m pytest -q` → **exit 0, 195 passed in 101.13s**（记录：195 passed in 102.40s；数量与退出码一致）。
+Spec 轴五项猎杀全部干净（early-return ≡ d_c_plus=0.0、桶穿守卫 enabled 恒真属死条件移除、retention 重算纯确定性、k_cost 提升经 Q4 授权、metrics 先建无 limitations 依赖——顺序可证保持：缺N→桶穿→③→六 append，④/4.6 零 append）。任务 2 的 15/19 偏差裁定：**Q5 钉死块贡献 ~8-10 决策点，≤10 算术上不可达——豁免成立，且已公开记录而非粉饰**。
 
-## Spec 轴（逐点对照旧实现）
+## Non-blocking 发现及处置
 
-| 等价点 | 旧实现 | 新实现 | 结论 |
-|---|---|---|---|
-| compare/stress/run 内层 SpecError | 422 + "场景不合法：" 前缀 + return True 短路 | `_load_spec_or_422`（server.py:76-81）返回 None，handler early-return | ✅ 仅这三路由使用 |
-| scenario/save 的 load_spec | 无内层 catch → 外层 422 str(exc) 无前缀 | `_h_scenario_save` 直调 load_spec，注释标明走外层 | ✅ 未误用助手 |
-| 外层异常包裹 | 双 except 罩全部分支 | `route_post` 查表后 try 罩 `handler(app, r)`，双 except 原文 | ✅ |
-| review 内层三异常 | (ValueError, FileNotFoundError, SpecError)→422 | `_h_review` 内层保留（server.py:290） | ✅ FileNotFoundError 不进外层 |
-| 锁粒度 | demo 锁 save_spec；run 锁封存+导出整块；export 无锁；scenario/{id} 锁 load | 逐 handler 原样（grep 抽查 10 处 with app.lock 位置一致） | ✅ |
-| body 读取 | demo 不读 body | dispatch 仅 `POST_ROUTES.get(path)`，各 handler 自读 | ✅（characterization 1 钉住 200） |
-| GET 两段匹配 | elif 链：精确在前、正则按序 | GET_EXACT 先查、GET_PATTERNS 顺序 fullmatch | ✅（characterization 6/7 钉住两种 404 体） |
-| 公开面 | route_get/route_post (app,h,path)->bool；make_handler/plugin/serve | 签名不变、后三者零改动 | ✅（import plugin ok） |
-| 响应体字段 | dict 字面量 | 逐字搬移 | ✅（15 条 server 测试 + workbench 分发测试） |
-
-复杂度目标达成（任务 4 证据）：route_post 29/105 → **4/6**，route_get 21/56 → **4/7**，26 个函数最大 _h_review 4/6——远优于 ≤15 目标。
-
-## Standards 轴
-
-- 表驱动分发符合仓库既有风格（阶段1 的 make_dispatch_handler 同构）；无新框架依赖。
-- 新增 characterization 均断言外部可观察行为（状态码/响应体文案），无实现复述。
-
-## Non-blocking 发现
-
-| # | 发现 | 分类 | 处置 |
-|---|---|---|---|
-| S1 | "缺少 run_id" 422 在 _h_review 与 _h_decision 各出现一次（2 处，锁环境不同）——可再提取 `_require_run_id`，但仅 2 处且语义带各自锁边界，提取收益边际 | non-blocking（judgement call） | 不处理 |
-| S2 | `handler(app, r, m) if m is not None else handler(app, r)` 表达式式分支略密；可统一 GET handler 签名为 `(app, r, m=None)` 消除 | non-blocking（judgement call） | 不处理——统一签名会把 m=None 渗进 7 个精确 handler |
+| # | 发现 | 处置 |
+|---|---|---|
+| N1 | `.flow/gen_fingerprint.py` 红队键名陈旧（golden_79_5 vs battery 的 golden_7900_500），重封存时只核对 3/12 却打印 "12/12" | **已修复**：键名对齐 battery + 断言命中数==12 后才打印；复跑 12/12 |
+| N2 | tasks 证据 "无 >15" 与 PRD "无 ≥15" 措辞漂移；15/19 是图谱工具口径（radon 口径 simulate=31） | 交接卡中统一表述：以图谱口径 15/19 记录 + Q5 偏差说明，标注工具约定 |
+| N3 | retention/conv/h 的轻度重复推导（冻结签名所迫） | 不处理——现在去重会破坏指纹纪律，留阶段5 若触碰再议 |
 
 ## 复核准则
 
-- S1：`grep -c "缺少 run_id" coupon_tool/server.py` == 2——满足
-- S2：route_get 内该行存在——满足（记录）
+- N1：重跑 gen_fingerprint.py 打印 12/12 且有命中数断言——已满足
+- N2：handoff 措辞修正——SHIP 时满足
+- N3：`grep -n "retention = 1.0" coupon_tool/engine.py` == 2——记录在案

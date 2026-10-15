@@ -15,11 +15,11 @@ from coupon_tool import load_spec, simulate
 from coupon_tool.synthetic import synthetic_spec_dict
 
 RED_TEAM_16 = {
-    "golden_no_coupon": "16634525229d2f2e", "golden_79_5": "299c771b592a7f7d",
-    "golden_99_10": "77e4165f6c2998d0", "golden_109_5": "440df9f9dca3d613",
-    "golden_129_5": "4859a42dcd4d4edd", "golden_139_5": "5220de8e50cc8550",
-    "golden_139_10": "197dbc7f09ba5813", "golden_139_20": "151cc7fa2cc724fa",
-    "golden_159_5": "487b0502d959979c", "golden_159_10": "450c92b8c786c3a2",
+    "golden_no_coupon": "16634525229d2f2e", "golden_7900_500": "299c771b592a7f7d",
+    "golden_9900_1000": "77e4165f6c2998d0", "golden_10900_500": "440df9f9dca3d613",
+    "golden_12900_500": "4859a42dcd4d4edd", "golden_13900_500": "5220de8e50cc8550",
+    "golden_13900_1000": "197dbc7f09ba5813", "golden_13900_2000": "151cc7fa2cc724fa",
+    "golden_15900_500": "487b0502d959979c", "golden_15900_1000": "450c92b8c786c3a2",
     "no_n": "f9b06638d064eb8f", "c0_zero": "32360df478aed4d2",
 }
 
@@ -90,4 +90,6 @@ if __name__ == "__main__":
     if failed:
         print("CROSS-CHECK FAILED:", failed)
         sys.exit(1)
-    print("cross-check: 12/12 match red-team prefixes")
+    matched = sum(1 for n in RED_TEAM_16 if n in out)
+    assert matched == len(RED_TEAM_16), f"交叉核对键名失效：仅 {matched}/{len(RED_TEAM_16)} 命中 battery"
+    print(f"cross-check: {matched}/{len(RED_TEAM_16)} match red-team prefixes")
