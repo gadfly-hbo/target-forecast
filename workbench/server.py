@@ -87,6 +87,25 @@ def make_handler(registry: Registry, assistant=None):
                 from .assistant import runtime
                 code, body = runtime.handle_chat(assistant, Responder(self).read_body())
                 Responder(self).send(code, json_bytes(body), "application/json; charset=utf-8")
+            elif self.path == "/api/assistant/exec_read" and assistant is not None:
+                # Path A：sidecar 读工具代理（名门禁在 service.exec_read）
+                try:
+                    body = Responder(self).read_body()
+                    summary = assistant.exec_read(str(body.get("name", "")), body.get("args") or {})
+                    Responder(self).send(200, json_bytes({"summary": summary}),
+                                         "application/json; charset=utf-8")
+                except (ValueError, KeyError, TypeError) as exc:
+                    Responder(self).send(422, json_bytes({"error": str(exc)}),
+                                         "application/json; charset=utf-8")
+            elif self.path == "/api/assistant/stage" and assistant is not None:
+                # Path A：sidecar 写提案登记（名门禁在 service.stage；不执行效果）
+                try:
+                    body = Responder(self).read_body()
+                    staged = assistant.stage(str(body.get("name", "")), body.get("args") or {})
+                    Responder(self).send(200, json_bytes(staged), "application/json; charset=utf-8")
+                except (ValueError, KeyError, TypeError) as exc:
+                    Responder(self).send(422, json_bytes({"error": str(exc)}),
+                                         "application/json; charset=utf-8")
             else:
                 Responder(self).json({"error": "not found"}, 404)
 
@@ -96,8 +115,14 @@ def make_handler(registry: Registry, assistant=None):
 def serve(root: Path | str, port: int = 8300, registry: Registry | None = None) -> None:
     root = Path(root).resolve()
     registry = registry or build_default_registry(root)
+    if port == 0:  # 显式 port 0：先探一个空闲端口，使 sidecar 拿到确定回环地址
+        import socket as _socket
+        probe = _socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
     from .assistant import runtime
-    sidecar = runtime.maybe_start_sidecar(root)
+    sidecar = runtime.maybe_start_sidecar(root, shell_url=f"http://127.0.0.1:{port}")
     if sidecar is not None:
         print("[助手] pi-agent sidecar 已启动 (127.0.0.1:8321)", flush=True)
         # 启动脚本用 SIGTERM 停壳：转成 KeyboardInterrupt 以走 finally 回收 sidecar（防孤儿占 8321）

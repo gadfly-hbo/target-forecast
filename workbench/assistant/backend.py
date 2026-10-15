@@ -20,6 +20,9 @@ class BackendUnavailable(RuntimeError):
 class ChatResult:
     reply: str = ""
     tool_calls: list[dict] = field(default_factory=list)
+    # True = 后端已自行编排工具（pi-agent runAgent 路径）：tool_calls 仅是
+    # 执行/登记摘要的透传（写项带 stage_pending/call_id），宿主不得再执行/登记
+    orchestrated: bool = False
 
 
 class EchoBackend:

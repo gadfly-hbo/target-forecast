@@ -276,3 +276,52 @@ def test_coupon_compare_branch():
     assert "/t/coupon/api/scenario/coupon-demo-001" in gets
     posts = [b for m, p, b in http.calls if m == "POST" and p == "/t/coupon/api/compare"]
     assert posts == [{"scenario": {"scenario_id": "coupon-demo-001"}}]
+
+
+# ---------- Path A：orchestrated 透传与双登记防回归 ----------
+
+class OrchestratedBackend:
+    """模拟 pi-agent sidecar：已自行编排，写项带 stage_pending/call_id。"""
+    def __init__(self, result):
+        self.result = result
+        self.calls = 0
+
+    def chat(self, messages, tools):
+        self.calls += 1
+        return self.result
+
+
+def test_orchestrated_relay_rebuilds_pending_without_restage():
+    from workbench.assistant.backend import ChatResult
+    svc, http = _svc3()
+    svc2 = AssistantService(svc.registry, None, http)  # 同一 registry/http，backend 后换
+    staged = svc2.stage("roi__set_plan_params", {"plan": "计划1", "params": {"cvr": 0.05}})
+    before = dict(svc2._pending)
+    result = ChatResult(
+        reply="已登记，请确认", orchestrated=True,
+        tool_calls=[{"name": "roi__set_plan_params", "args": staged["args"],
+                     "summary": "写提案已登记", "stage_pending": True, "call_id": staged["call_id"]}])
+    svc2.backend = OrchestratedBackend(result)
+    res = svc2.chat({"message": "把计划1 cvr 调到 5%", "history": [], "tool_id": "roi"})
+    assert res["pending_confirmation"]["call_id"] == staged["call_id"]
+    assert res["pending_confirmation"]["args"] == staged["args"]
+    assert "preview" in res["pending_confirmation"]
+    assert res["reply"] == "已登记，请确认"
+    # 防回归核心：不再执行/登记（_pending 不变，无额外 HTTP 工具调用）
+    assert svc2._pending == before
+    assert len(http.calls) == 0
+    assert svc2.backend.calls == 1
+
+
+def test_exec_read_and_stage_name_gating():
+    import pytest as _pytest
+    svc, _ = _svc3()
+    with _pytest.raises(ValueError):
+        svc.exec_read("roi__set_plan_params", {})   # 写工具不可走读执行
+    with _pytest.raises(ValueError):
+        svc.stage("roi__get_state", {})             # 读工具不可走写登记
+    with _pytest.raises(ValueError):
+        svc.exec_read("nope", {})
+    out = svc.stage("forecast__set_scenario_params", {"scenario": "挑战", "params": {"new_customers_growth": 0.2}})
+    assert out["call_id"] and out["action"] == "forecast__set_scenario_params" and out["preview"]
+    assert out["call_id"] in svc._pending

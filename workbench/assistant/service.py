@@ -49,6 +49,8 @@ class AssistantService:
             {"role": "user", "content": payload.get("message", "")},
         ]
         result = self.backend.chat(messages, tools_mod.to_openai(self.tools))
+        if result.orchestrated:
+            return self._relay_orchestrated(result)
         executed: list[tuple[dict, str]] = []
 
         for _ in range(self.MAX_ROUNDS):
@@ -79,6 +81,35 @@ class AssistantService:
 
         return {"reply": result.reply or executed[-1][1], "tool_calls": [{**tc, "summary": s} for tc, s in executed],
                 "pending_confirmation": None}
+
+    # ---------- Path A：sidecar 编排结果的透传（写项已在 /stage 登记进本实例 _pending） ----------
+
+    def _relay_orchestrated(self, result) -> dict:
+        staged = [tc for tc in result.tool_calls if tc.get("stage_pending")]
+        pending = None
+        if staged:
+            tc = self._pending.get(staged[0].get("call_id") or "")
+            if tc is None:
+                return {"reply": result.reply or "（写提案登记已失效，请重试）",
+                        "tool_calls": result.tool_calls, "pending_confirmation": None}
+            pending = {"call_id": staged[0]["call_id"], "action": tc["name"], "args": tc["args"],
+                       "preview": self._preview(tc)}
+        return {"reply": result.reply, "tool_calls": result.tool_calls, "pending_confirmation": pending}
+
+    def exec_read(self, name: str, args: dict) -> str:
+        """sidecar 读工具代理入口（名门禁：非 x-write 才可执行）。"""
+        if name not in self._by_name or self._by_name[name]["x-write"]:
+            raise ValueError(f"exec_read 只接受只读工具，拒绝：{name}")
+        return self._execute({"name": name, "args": args or {}})
+
+    def stage(self, name: str, args: dict) -> dict:
+        """sidecar 写提案登记入口（名门禁：x-write 才可登记；不执行效果）。"""
+        if name not in self._by_name or not self._by_name[name]["x-write"]:
+            raise ValueError(f"stage 只接受写工具，拒绝：{name}")
+        tc = {"name": name, "args": args or {}}
+        call_id = uuid.uuid4().hex[:12]
+        self._pending[call_id] = tc
+        return {"call_id": call_id, "action": name, "args": tc["args"], "preview": self._preview(tc)}
 
     # ---------- 两步确认（G2） ----------
 

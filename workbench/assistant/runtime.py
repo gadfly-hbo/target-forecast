@@ -139,8 +139,12 @@ def _find_node() -> str | None:
     return str(candidate) if candidate.is_file() else None
 
 
-def maybe_start_sidecar(root: Path) -> subprocess.Popen | None:
-    """node 与构建产物可用则拉起 pi sidecar（G5）；返回 None 表示降级。"""
+def maybe_start_sidecar(root: Path, shell_url: str | None = None) -> subprocess.Popen | None:
+    """node 与构建产物可用则拉起 pi sidecar（G5）；返回 None 表示降级。
+
+    shell_url：workbench 壳的回环地址（含端口）——Path A 后 sidecar 的工具
+    execute() 经它代理回 /api/assistant/{exec_read,stage}；缺省回落 8300。
+    """
     sidecar_dir = _sidecar_dir(root)
     entry = sidecar_dir / "dist" / "server.js"
     node = _find_node()
@@ -150,7 +154,8 @@ def maybe_start_sidecar(root: Path) -> subprocess.Popen | None:
     env = {**os.environ,
            "WORKBENCH_LLM_API_KEY": cfg.get("api_key", ""),
            "WORKBENCH_LLM_BASE_URL": cfg.get("base_url", MIMO_BASE_URL),
-           "WORKBENCH_LLM_MODEL": cfg.get("model", DEFAULT_MODEL)}
+           "WORKBENCH_LLM_MODEL": cfg.get("model", DEFAULT_MODEL),
+           "WORKBENCH_SHELL_URL": shell_url or "http://127.0.0.1:8300"}
     try:
         proc = subprocess.Popen([node, str(entry)], cwd=sidecar_dir, env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
