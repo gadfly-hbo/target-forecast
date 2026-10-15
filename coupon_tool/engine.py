@@ -285,7 +285,6 @@ def simulate(spec: ScenarioSpec, candidate: dict) -> SimulationResult:
     pi0_by_basket = [r["_pi_single"] for r in base_rows]
 
     ledger: list = []
-    e_pi_after = 0.0     # Σ wᵢ·Σₕ p·π（基准人群，券场景）
     l_rate = 0.0         # L = Σ wᵢ·流失概率
     e_pi0 = 0.0          # Σ wᵢ·π₀ᵢ
     topup_at_threshold = False
@@ -303,7 +302,6 @@ def simulate(spec: ScenarioSpec, candidate: dict) -> SimulationResult:
             row = _row("base", "无券基准原样购买", label, 1.0, n_visitors * c0 * w, a, 0, 0,
                        spec, m_i, m_addon, a, basket_index=i)
             ledger.append(row)
-            e_pi_after += w * row["_pi_single"]
             continue
 
         branches, loss_i, topup_default = _basket_branches(spec, bk, i, t, f, limitations)
@@ -313,7 +311,6 @@ def simulate(spec: ScenarioSpec, candidate: dict) -> SimulationResult:
             row = _row(group, name, label, p, n_visitors * c0 * w * p, amt, u, f, spec, m_i, m_addon, a,
                        basket_index=i)
             ledger.append(row)
-            e_pi_after += w * p * row["_pi_single"]
 
     # 子模型③：转化响应
     retention = 1.0 - l_rate
