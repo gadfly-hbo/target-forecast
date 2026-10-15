@@ -216,3 +216,33 @@ def test_engine_version_stamped():
     spec = build_synthetic_spec()
     res = simulate(spec, {"enabled": False, "threshold_cents": None, "face_value_cents": 0})
     assert res.engine_version == ENGINE_VERSION
+
+
+# ---------- 阶段5 门禁：_check_behavior errors 顺序钉死（连续块拆分的行为面） ----------
+
+def test_check_behavior_error_order_sealed():
+    """五块全触发 + 块内多错误：errors 列表顺序即 API 文案（422 拼接/demo validation），逐条钉死。"""
+    from coupon_tool.synthetic import build_synthetic_spec
+    from coupon_tool.spec import validate_spec
+    spec = build_synthetic_spec()
+    h = spec.behavior
+    h.redeem_natural = 1.5          # 块①：四名字概率循环
+    h.reach_new = 1.5               # 块②
+    h.q_mode = "banana"             # 块③：未知模式 + 非法曲线
+    h.q_curve = {"q_cap": 1.5, "lam": -1, "d_ref": -1}
+    h.conversion = {"mode": "relative", "k": -1, "s_max": -1}   # 块④：块内两条
+    h.new_basket = [{"weight": 0.6, "amount_cents": "x", "redeem": 2}]  # 块⑤：权重+逐项
+    assert validate_spec(spec)["errors"] == [
+        "redeem_natural[0] 必须是 [0,1] 内的概率，得到 1.5",
+        "redeem_natural[1] 必须是 [0,1] 内的概率，得到 1.5",
+        "redeem_natural[2] 必须是 [0,1] 内的概率，得到 1.5",
+        "redeem_natural[3] 必须是 [0,1] 内的概率，得到 1.5",
+        "redeem_natural[4] 必须是 [0,1] 内的概率，得到 1.5",
+        "新增触达 e⁺ 必须是 [0,1] 内的概率，得到 1.5",
+        "未知凑单模式 'banana'",
+        "k 必须 ≥ 0",
+        "s_max 必须 ≥ 0",
+        "新增结果分布 vⱼ 权重合计必须为 1，实际 0.600000",
+        "新增结果[0]金额必须是正整数分或 'at_threshold'",
+        "新增结果[0]核销状态必须为 0/1",
+    ]
