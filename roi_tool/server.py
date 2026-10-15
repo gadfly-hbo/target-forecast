@@ -9,52 +9,15 @@
 """
 from __future__ import annotations
 
-import json
-import mimetypes
-import re
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from tools_common.httpkit import (AssistantParamsStore, Responder,
+                                  make_dispatch_handler, serve_quiet)
 
 from . import ENGINE_VERSION, PlanError, demo
 from .engine import evaluate
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-
-
-def _json_bytes(obj) -> bytes:
-    return json.dumps(obj, ensure_ascii=False).encode("utf-8")
-
-
-class _Responder:
-    """handler 的响应帮助方法（独立 server 与 workbench 壳分发共用）。"""
-
-    def __init__(self, h: BaseHTTPRequestHandler):
-        self.h = h
-
-    def send(self, code: int, body: bytes, ctype: str):
-        self.h.send_response(code)
-        self.h.send_header("Content-Type", ctype)
-        self.h.send_header("Content-Length", str(len(body)))
-        self.h.send_header("Cache-Control", "no-store")
-        self.h.end_headers()
-        self.h.wfile.write(body)
-
-    def json(self, obj, code: int = 200):
-        self.send(code, _json_bytes(obj), "application/json; charset=utf-8")
-
-    def read_body(self) -> dict:
-        length = int(self.h.headers.get("Content-Length") or 0)
-        if not length:
-            return {}
-        return json.loads(self.h.rfile.read(length).decode("utf-8"))
-
-    def static(self, name: str):
-        path = (STATIC_DIR / name).resolve()
-        if not path.is_file():
-            self.json({"error": "not found"}, 404)
-            return
-        ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-        self.send(200, path.read_bytes(), ctype + "; charset=utf-8")
 
 
 def state_payload() -> dict:
@@ -78,25 +41,12 @@ class App:
 
     def __init__(self, root: Path):
         self.root = Path(root).resolve()
-
-    def params_path(self) -> Path:
-        return self.root / "workspace" / "roi" / "assistant_params.json"
-
-    def load_assistant_params(self) -> dict:
-        f = self.params_path()
-        if f.is_file():
-            return json.loads(f.read_text(encoding="utf-8"))
-        return {}
-
-    def save_assistant_params(self, store: dict) -> None:
-        f = self.params_path()
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.params = AssistantParamsStore(self.root / "workspace" / "roi" / "assistant_params.json")
 
 
-def route_get(app: App, h: BaseHTTPRequestHandler, path: str) -> bool:
+def route_get(app: App, h, path: str) -> bool:
     """处理 GET；返回 False 表示未命中（调用方回 404）。"""
-    r = _Responder(h)
+    r = Responder(h, STATIC_DIR)
     if path in ("/", "/index.html"):
         r.static("index.html")
     elif path == "/style.css":
@@ -106,15 +56,15 @@ def route_get(app: App, h: BaseHTTPRequestHandler, path: str) -> bool:
     elif path == "/api/state":
         r.json(state_payload())
     elif path == "/api/assistant_params":
-        r.json(app.load_assistant_params())
+        r.json(app.params.load())
     else:
         return False
     return True
 
 
-def route_post(app: App, h: BaseHTTPRequestHandler, path: str) -> bool:
+def route_post(app: App, h, path: str) -> bool:
     """处理 POST；返回 False 表示未命中（调用方回 404）。"""
-    r = _Responder(h)
+    r = Responder(h, STATIC_DIR)
     if path == "/api/assistant_params":
         # 写操作：助手调参（经确认门后由壳执行到此），按计划名合并补丁；
         # 未知计划名拒绝（防 LLM 幻觉名落盘）
@@ -124,11 +74,8 @@ def route_post(app: App, h: BaseHTTPRequestHandler, path: str) -> bool:
         if unknown:
             r.json({"error": f"未知计划名：{'、'.join(unknown)}（现有：{'、'.join(sorted(known))}）"}, 422)
             return True
-        store = app.load_assistant_params()
-        for name, params in (body.get("plans") or {}).items():
-            store.setdefault("plans", {}).setdefault(name, {}).update(params or {})
-        app.save_assistant_params(store)
-        r.json({"saved": True, "plans": store.get("plans", {})})
+        plans = app.params.merge("plans", body.get("plans") or {})
+        r.json({"saved": True, "plans": plans})
         return True
     if path != "/api/calc":
         return False
@@ -147,25 +94,16 @@ def route_post(app: App, h: BaseHTTPRequestHandler, path: str) -> bool:
 def make_handler(app: App | None = None):
     app = app or App(Path.cwd())
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, fmt, *args):  # 安静模式
-            pass
+    def handle_get(h, path):
+        return route_get(app, h, path)
 
-        def do_GET(self):
-            if not route_get(app, self, self.path):
-                _Responder(self).json({"error": "not found"}, 404)
+    def handle_post(h, path):
+        return route_post(app, h, path)
 
-        def do_POST(self):
-            if not route_post(app, self, self.path):
-                _Responder(self).json({"error": "not found"}, 404)
-
-    return Handler
+    return make_dispatch_handler(handle_get, handle_post)
 
 
 def serve(port: int = 8320):
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(App(Path.cwd())))
-    print(f"投放 ROI 测算工作台：http://127.0.0.1:{port}（本机运行）")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        httpd.shutdown()
+    """独立入口（当前无 CLI 调用方，半保留）；壳内路径走 plugin.py。"""
+    serve_quiet(make_handler(App(Path.cwd())), port,
+                f"投放 ROI 测算工作台：http://127.0.0.1:{port}（本机运行）")

@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 import importlib
-import json
 import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from tools_common.httpkit import Responder, json_bytes
 
 from .registry import Registry
 
@@ -40,18 +41,6 @@ def build_default_registry(root: Path) -> Registry:
     return reg
 
 
-def _json_bytes(obj) -> bytes:
-    return json.dumps(obj, ensure_ascii=False).encode("utf-8")
-
-
-def _send(handler, code: int, body: bytes, ctype: str) -> None:
-    handler.send_response(code)
-    handler.send_header("Content-Type", ctype)
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    handler.wfile.write(body)
-
-
 def make_handler(registry: Registry, assistant=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # 安静模式
@@ -61,49 +50,45 @@ def make_handler(registry: Registry, assistant=None):
             m = _TOOL_PREFIX.match(self.path)
             tool = registry.get(m.group(1)) if m else None
             if tool is None:
-                _send(self, 404, b'{"error": "unknown tool"}', "application/json; charset=utf-8")
+                Responder(self).json({"error": "unknown tool"}, 404)
                 return
             sub = m.group(2) or "/"
             fn = tool["handle_get"] if method == "GET" else tool["handle_post"]
             if not fn(self, sub):
-                _send(self, 404, b'{"error": "not found"}', "application/json; charset=utf-8")
-
-        def _read_json_body(self) -> dict:
-            n = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(n) or b"{}")
+                Responder(self).json({"error": "not found"}, 404)
 
         def do_GET(self) -> None:
             if _TOOL_PREFIX.match(self.path):
                 self._route_tool("GET")
             elif self.path.split("?")[0] in ("/", "/index.html"):
                 # 容忍 query string：旧启动脚本的 /?tool=xxx 深链自 P0 起就在这里 404（P2 e2e 暴露）
-                _send(self, 200, (SHELL_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
+                Responder(self).send(200, (SHELL_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
             elif self.path in ("/style.css", "/app.js") or self.path.startswith("/assets/"):
                 f = (SHELL_DIR / self.path.lstrip("/")).resolve()
                 if not str(f).startswith(str(SHELL_DIR.resolve()) + os.sep) or not f.is_file():
-                    _send(self, 404, b'{"error": "not found"}', "application/json; charset=utf-8")
+                    Responder(self).json({"error": "not found"}, 404)
                     return
                 ctype = {"css": "text/css", "js": "application/javascript", "png": "image/png"}.get(
                     f.suffix.lstrip("."), "application/octet-stream")
-                _send(self, 200, f.read_bytes(), f"{ctype}; charset=utf-8" if ctype.startswith("text") else ctype)
+                Responder(self).send(200, f.read_bytes(), f"{ctype}; charset=utf-8" if ctype.startswith("text") else ctype)
             elif self.path == "/api/assistant/status" and assistant is not None:
-                _send(self, 200, _json_bytes({"backend": type(assistant.backend).__name__}),
+                Responder(self).send(200, json_bytes({"backend": type(assistant.backend).__name__}),
                       "application/json; charset=utf-8")
             elif re.fullmatch(r"/api/state(\?.*)?", self.path):
-                _send(self, 200, _json_bytes({"version": _SHELL_VERSION, "tools": registry.manifest()}),
+                Responder(self).send(200, json_bytes({"version": _SHELL_VERSION, "tools": registry.manifest()}),
                       "application/json; charset=utf-8")
             else:
-                _send(self, 404, b'{"error": "not found"}', "application/json; charset=utf-8")
+                Responder(self).json({"error": "not found"}, 404)
 
         def do_POST(self) -> None:
             if _TOOL_PREFIX.match(self.path):
                 self._route_tool("POST")
             elif self.path == "/api/assistant/chat" and assistant is not None:
                 from .assistant import runtime
-                code, body = runtime.handle_chat(assistant, self._read_json_body())
-                _send(self, code, _json_bytes(body), "application/json; charset=utf-8")
+                code, body = runtime.handle_chat(assistant, Responder(self).read_body())
+                Responder(self).send(code, json_bytes(body), "application/json; charset=utf-8")
             else:
-                _send(self, 404, b'{"error": "not found"}', "application/json; charset=utf-8")
+                Responder(self).json({"error": "not found"}, 404)
 
     return Handler
 

@@ -9,17 +9,17 @@
 
 from __future__ import annotations
 
-import json
-import mimetypes
 import re
 import urllib.parse
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yaml
+
+from tools_common.httpkit import (AssistantParamsStore, Responder,
+                                  make_dispatch_handler, serve_quiet)
 
 from . import aggregate, demo, engine, ingest_agg, ingest_detail, report
 
@@ -49,6 +49,8 @@ class WorkbenchState:
         self.lock = threading.Lock()
         self.platforms: dict[str, dict] = {}
         self.demo_used = False
+        self.params = AssistantParamsStore(
+            root / "workspace" / "forecast" / "assistant_params.json")
 
     def load(self, force: bool = False) -> None:
         with self.lock:
@@ -165,61 +167,19 @@ def calc(state: WorkbenchState, cfg: dict, scenarios: dict) -> dict:
     }
 
 
-class _Responder:
-    """handler 的响应帮助方法（独立 server 与 workbench 壳分发共用）。"""
-
-    def __init__(self, h: BaseHTTPRequestHandler):
-        self.h = h
-
-    def send(self, code: int, body: bytes, ctype: str):
-        self.h.send_response(code)
-        self.h.send_header("Content-Type", ctype)
-        self.h.send_header("Content-Length", str(len(body)))
-        self.h.send_header("Cache-Control", "no-store")
-        self.h.end_headers()
-        self.h.wfile.write(body)
-
-    def json(self, obj, code=200):
-        body = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8")
-        self.send(code, body, "application/json; charset=utf-8")
-
-    def read_body(self) -> dict:
-        length = int(self.h.headers.get("Content-Length") or 0)
-        if not length:
-            return {}
-        return json.loads(self.h.rfile.read(length).decode("utf-8"))
-
-
-def _assistant_params_path(root: Path) -> Path:
-    return root / "workspace" / "forecast" / "assistant_params.json"
-
-
-def load_assistant_params(root: Path) -> dict:
-    f = _assistant_params_path(root)
-    if f.is_file():
-        return json.loads(f.read_text(encoding="utf-8"))
-    return {}
-
-
-def save_assistant_params(root: Path, store: dict) -> None:
-    f = _assistant_params_path(root)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def route_get(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path: str) -> bool:
+def route_get(state: WorkbenchState, cfg: dict, h, path: str) -> bool:
     """处理 GET；返回 False 表示未命中（调用方回 404）。path 保留 query string。"""
-    r = _Responder(h)
+    r = Responder(h, STATIC_DIR)
     try:
         if path in ("/", "/index.html"):
-            r.send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
-        elif path in ("/style.css", "/app.js"):
-            f = STATIC_DIR / path.lstrip("/")
-            ctype = mimetypes.guess_type(f)[0] or "application/octet-stream"
-            r.send(200, f.read_bytes(), f"{ctype}; charset=utf-8")
+            r.static("index.html")
+        elif path == "/style.css":
+            r.static("style.css")
+        elif path == "/app.js":
+            r.static("app.js")
         elif path == "/api/assistant_params":
             # 助手调参持久化（P3）：前端启动时读取并应用，刷新后生效
-            r.json(load_assistant_params(state.root))
+            r.json(state.params.load())
         elif re.match(r"^/api/state(\?|$)", path):
             force = "reload=1" in path
             r.json(state.state_payload(cfg, force=force))
@@ -247,23 +207,19 @@ def route_get(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path:
     return True
 
 
-def route_post(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path: str) -> bool:
+def route_post(state: WorkbenchState, cfg: dict, h, path: str) -> bool:
     """处理 POST；返回 False 表示未命中（调用方回 404）。"""
-    r = _Responder(h)
+    r = Responder(h, STATIC_DIR)
     try:
         if path == "/api/assistant_params":
             # 写操作：助手调参（经确认门后由壳执行到此），按情景合并补丁
             body = r.read_body()
-            store = load_assistant_params(state.root)
-            for name, params in (body.get("scenarios") or {}).items():
-                store.setdefault("scenarios", {}).setdefault(name, {}).update(params or {})
-            save_assistant_params(state.root, store)
-            r.json({"saved": True, "scenarios": store.get("scenarios", {})})
+            scenarios = state.params.merge("scenarios", body.get("scenarios") or {})
+            r.json({"saved": True, "scenarios": scenarios})
             return True
         if path != "/api/calc":
             return False
-        n = int(h.headers.get("Content-Length") or 0)
-        payload = json.loads(h.rfile.read(n) or b"{}")
+        payload = r.read_body()
         scenarios = _validate_scenarios(payload.get("scenarios"), cfg["scenarios"])
         r.json(calc(state, cfg, scenarios))
     except Exception as e:  # noqa: BLE001
@@ -272,28 +228,18 @@ def route_post(state: WorkbenchState, cfg: dict, h: BaseHTTPRequestHandler, path
 
 
 def make_handler(state: WorkbenchState, cfg: dict):
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, fmt, *args):  # 安静模式，只记录错误
-            pass
+    def handle_get(h, path):
+        return route_get(state, cfg, h, path)
 
-        def do_GET(self):
-            if not route_get(state, cfg, self, self.path):
-                _Responder(self).send(404, b"not found", "text/plain; charset=utf-8")
+    def handle_post(h, path):
+        return route_post(state, cfg, h, path)
 
-        def do_POST(self):
-            if not route_post(state, cfg, self, self.path):
-                _Responder(self).send(404, b"not found", "text/plain; charset=utf-8")
-
-    return Handler
+    return make_dispatch_handler(handle_get, handle_post)
 
 
 def serve(root: Path, port: int = 8300) -> None:
     cfg = load_cfg(root)
     state = WorkbenchState(root, cfg["caliber"])
     state.load()  # 启动即装载数据，失败早暴露
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state, cfg))
-    print(f"目标测算工作台已启动 → http://127.0.0.1:{port}  （Ctrl+C 退出；数据不出本机）")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\n已退出。")
+    serve_quiet(make_handler(state, cfg), port,
+                f"目标测算工作台已启动 → http://127.0.0.1:{port}  （Ctrl+C 退出；数据不出本机）")
