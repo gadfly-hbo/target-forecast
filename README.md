@@ -66,7 +66,7 @@ roi_tool/plugin.py               投放 ROI 测算插件适配（/t/roi/）
 
 **LLM 后端**（自动探测，启动日志明示当前后端）：
 
-1. **pi-agent sidecar**（首选）：`assistant-sidecar/` 用 `@earendil-works/pi-ai` 驱动小米 MIMO（与 deep-research 同栈）；壳在 node 可用且已构建（`cd assistant-sidecar && npm install && npm run build`）时自动拉起 127.0.0.1:8321。
+助手 sidecar 构建于 pi-agent-runtime@0.4.3（产品代码零 pi-ai 直接依赖）。
 2. **OpenAI 兼容直连**：无 sidecar 但有 key 时由 Python 壳直连。
 3. **回放模式**：两者皆无时的兜底，界面明示「回放模式（非真 LLM）」，响应来自预录脚本。
 
