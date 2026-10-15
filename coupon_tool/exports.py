@@ -138,7 +138,7 @@ def _section_neighbors(add, top: dict) -> None:
     add("")
 
 
-def _section_stress(add, run: dict, top) -> None:
+def _section_stress(add, run: dict) -> None:
     stress = run.get("stress")
     add("### 最敏感假设与不利情景")
     if stress and stress.get("sensitive_params"):
@@ -192,7 +192,7 @@ def export_markdown(run: dict, path: str, decision: dict | None = None) -> str:
         _section_breakeven(add, top)
         _section_decomposition(add, top)
         _section_neighbors(add, top)
-    _section_stress(add, run, top)
+    _section_stress(add, run)
     _section_limitations(add, top)
     _section_decision(add, decision)
     add("---")

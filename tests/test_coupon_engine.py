@@ -228,7 +228,7 @@ def test_check_behavior_error_order_sealed():
     h = spec.behavior
     h.redeem_natural = 1.5          # 块①：四名字概率循环
     h.reach_new = 1.5               # 块②
-    h.q_mode = "banana"             # 块③：未知模式 + 非法曲线
+    h.q_mode = "banana"             # 块③：未知模式（curve 参数在非 curve 模式下惰性）
     h.q_curve = {"q_cap": 1.5, "lam": -1, "d_ref": -1}
     h.conversion = {"mode": "relative", "k": -1, "s_max": -1}   # 块④：块内两条
     h.new_basket = [{"weight": 0.6, "amount_cents": "x", "redeem": 2}]  # 块⑤：权重+逐项

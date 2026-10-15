@@ -1,90 +1,59 @@
-## Red-Team: 阶段4 拆分 `coupon_tool/engine.py::simulate`（只搬移、逐位不变、pytest 绿）
+## Red-Team: 阶段5收官批——三个"行为不变"复杂度重构 + 三项遗留 + 测试 helper 去重（7 项一揽）
 
-**结论先行：GO（附 3 项开工前置条件）。** 没有任何 kill-assumption 的 kill criterion 已被满足——搬移路径本身成立；但计划的**验证故事**已被实验证伪：现有 pytest 套件对三类真实漂移全部放行（68/68 绿）。以下是证据、排序与最廉价的修复。
+> fresh-context 红队，2026-10-15。全部结论基于本机代码实读 + 可执行实验（NaN 构造、HTTP 422 复现、基线 pytest 89 passed / 52.6s，覆盖六个受影响测试文件）。行号以当前工作区为准。
 
-**实验方法**：在 /tmp 的仓库副本上注入三个代表性"接线漂移"突变，跑全量 coupon 测试（68 项）并与逐字段指纹（sha256 of full `SimulationResult` JSON，18+1 用例）比对。基线：coupon 子集 68 passed / 0.5s；全仓 195 passed / 109.5s。
+### Top Kill-Assumptions (ranked)
 
-| 突变 | 内容 | pytest | 指纹 |
-|---|---|---|---|
-| MUT1 | 桶穿 limitation 从循环内挪到汇总段（顺序漂移） | **68 绿** | 组合用例捕获：`dad16601057c4b99`→`2ce1310d0bdf148d`，桶穿与 C₀=0 两条互换 |
-| MUT2 | `topup_at_threshold` 改为"末篮子覆盖"语义 | **68 绿** | mixed-topup 用例捕获：`a9c0ad3fc12d310f`→`60e8a2c51ca0b93e`，丢一条 limitation |
-| MUT3 | `l_rate` 奇偶分桶二级重聚合（浮点结合序漂移） | **68 绿** | 2/18 用例捕获：`197dbc7f09ba5813`→`b0dd529027b1d36b` 等 |
+**K1（最优先）：spec 拆分按"校验主题"命名会把非连续代码段缝在一起，静默重排 API 可见的 errors 顺序——且现有测试完全不钉顺序**
 
-三个突变都**不是算术错误**，恰恰是"提取 helper 后接线"最容易犯的那类错——全部静默通过提案声称的安全网。
+- **Claim：** 提案硬约束 2：`_check_behavior` 拆成 `_check_reach / _check_q / _check_conversion` 等小函数后"errors/warnings 顺序不变（API 可见）"。
+- **Steelman：** 现函数（spec.py:171-220）的 append 顺序天然按主题分段：四名字循环（reach_base/redeem_natural/redeem_topup/churn，:177-184）→ reach_new（:185）→ q_mode/q_curve/q_table（:186-196）→ conversion（:197-208）→ new_basket 权重/逐项/缺失（:209-219）。只要**按连续代码块切**、按原顺序拼接，顺序逐条保真，纯搬移零风险。
+- **Fails if：** 实施者按**领域主题**而非**连续块**切——提案自己的命名正在诱导这件事：`_check_reach` 作为领域概念应同时管 `reach_base`（:177 循环内）和 `reach_new`（:185，位于 churn 之后）。合进一个 `_check_reach` 后，"新增触达 e⁺ 必须是 [0,1]…"会从 redeem/churn 错误**之后**移到**之前**——`load_spec` 用"；"拼接成单条 SpecError（spec.py:308），`/api/compare` 422 体（server.py:80 `场景不合法：{joined}`）、`/api/demo` 的 `validation.errors` 列表（前端按序渲染）、compare 候选级 violations 文案（compare.py:269）全部变文本。而**没有任何测试钉住顺序或拼接文本**：`test_validate_spec_reports_weight_and_probability_issues`（test_coupon_engine.py:206-212）用 `any()` 成员断言；test_coupon_storage.py:40 同类；全 tests/ 无一处断言含"；"的完整错误串。重排后 pytest 全绿，硬约束 2 已被违反而门禁无感——这正是阶段4 红队用 MUT 实证过的"现有测试对静默漂移全部放行"的同款盲区，且这次**没有指纹门禁兜底**。
+- **Evidence：** 已完成（本红队实读）：顺序链 = `validate_spec` 拼接 `_check_semantics + _check_cost + _check_behavior`（spec.py:225），尾部再 append 受控亏损错误（:226-227）；`_check_behavior` 内部顺序如上。另注意提案开放问题"errors 与 warnings 在同一函数里混着 append？"——**答案是没有**：三个 `_check_*` 只产 errors，warnings 全在 `validate_spec`（:228-232），拆分无需处理 warnings 混排。
+- **Kill criterion：** PRD 若拍板"领域主题切分"（reach_base+reach_new 同函数）而非"连续块切分"，或动工前不补顺序钉死测试，则该项不得自称"行为不变"。
+- **Cheapest test：** 动工前加一条 characterization：构造一个同时触发 ≥4 类 behavior 错误的 fixture（如 `redeem_natural=1.5` + `reach_new=1.5` + 未知 `q_mode` + 缺 `new_basket`），断言 `validate_spec(...)["errors"]` **精确等于**完整列表字面量。约 10 行。
 
----
+**K2：markdown"字节级不变"是本阶段唯一写了却没有任何门禁约束的硬约束**
 
-### Top Kill-Assumptions（按 影响×可能性×可测性 排序）
+- **Claim：** 硬约束 2："markdown 导出字节级不变（导出文件内容）"。
+- **Steelman：** `export_markdown`（exports.py:79-170）是 `run` dict + `decision` 的纯函数，无 I/O 副作用、无时间依赖；按段落切 `_section_*`、每段原样搬 `add(...)` 调用串，字节保真是机械可达的。
+- **Fails if：** `_section_*` 各自管理段尾空行——重复或丢失一个空行、`---` 分隔线位置漂移、某 else 分支措辞变化，pytest 依然全绿：现有覆盖只有 substring 冒烟（test_coupon_server.py:178-179）和文件名存在性（test_coupon_cli.py:22）。
+- **Kill criterion：** 若 PRD 不为该项补字节门禁就开工，硬约束 2 的 markdown 半句不可证伪。
+- **Cheapest test：** 动工前封存 sha256：`build_synthetic_spec → compare → record_run → export_markdown(run, decision=两种形态)`，对 `run_id` 归一后取哈希 inline 进测试（先例：test_engine_fingerprint.py）。decision 有/无、stress 有/无至少各封一形态，约 25 行。
 
-#### 1.「pytest 绿 + 黄金数值 = 逐位不变的充分验证」——**已被证伪**
-- **Claim**：约束2 的安全网是 `test_coupon_engine.py` 黄金数值与 4.6 对平断言（proposal.md:26）。
-- **Steelman**：黄金表容差确实紧——实际 `TOL_CENTS = 1`（tests/test_coupon_engine.py:14）和 `abs=2`（tests/test_coupon_compare.py:30），比提案写的"±100"强 50 倍；对平断言 ±1 分。能抓住任何公式级错误（元级漂移）。
-- **Fails if**：漂移小于容差——MUT1/2/3 全部低于阈值。limitations 顺序无任何测试钉住（所有断言都是 `any(...)`，test_coupon_engine.py:173、test_coupon_ingest.py:86,120）；混合 `topup_amount_cents` 场景仓库里不存在；未取整浮点字段（`conversion_rate`/`delta_c`/`roi`/`orders` 系）的 1-ulp 漂移远小于 5e-6。另：`Store.replay_run` 的 M20"逐位一致"（storage.py:100）只在同一份代码内对比（test_coupon_storage.py:30-32 同进程两次计算），跨重构不设防；且 `workspace/coupon/runs/` 当前为空，**没有可用的重构前封存运行**。
-- **Evidence to get this week**：上表（已取得）。
-- **Kill criterion**：若流程拒绝增加指纹门禁，约束2 完全依赖实施纪律 → 该约束形同虚设。
-- **Cheapest test**（~30 行、0.2s、已验证稳定）：重构前对一组候选跑 `simulate`，序列化 `{candidate, metrics, ledger, limitations, decomposition, validation}` 为 `json.dumps(..., sort_keys=True)` 取 sha256，封存；重构后必须逐 hash 相等。battery 必须**刻意组合** limitation 触发条件——我最初的 18 用例漏了"桶穿+③"组合，MUT1 一度漏网，补组合用例后才捕获。仓库有直接先例：阶段1 红队盲区转正为 `tests/test_httpkit_characterization.py`。金额字段已被 `round(…,6)` 量化（1e-6 分以下漂移在输出上本就不可观测），比特敏感面是未取整字段——指纹天然覆盖。
+**K3：assistant `_execute` 的 8 条分支有 4 条零执行覆盖，表驱动重构在无人区作业**
 
-#### 2.「limitations 列表可跨 4 个区域共享、顺序天然保住」——顺序是用户可见输出，且无测试钉住
-- **Claim**：开放问题（proposal.md:42）在"就地 append"与"各自返回再合并"之间未定，仅倾向前者。
-- **Steelman**：就地 append 传引用确实零顺序风险；提案也明确拒绝了"顺手修重复 append 模式"（proposal.md:38）。
-- **Fails if**：实现者选了"返回新列表再合并"（开放问题的另一半）——桶穿条目（engine.py:191-195，循环内）与 ③ 的条目（engine.py:212,218）及汇总段条目（engine.py:254-265）的相对顺序即漂移。该顺序在 compare 行级 `limitations`（compare.py:276）、前端 warn-card（static/app.js:295,421）、导出摘要"已知限制"（exports.py:153）三处用户可见。
-- **Cheapest test**：组合用例（桶穿 + C₀=0）进 battery。
-- **Kill criterion**：方案必须现在把开放问题定死为"就地 append 传引用，或 append 全部留在 `simulate`、helper 纯函数"，**禁止返回-合并**。
+- **Claim：** 提案：`_execute`（11/15）"action 分发改表驱动"。
+- **Steelman：** 确认门（G2）与写标志判定全在 `chat()`（service.py:61-69），`_execute` 是纯执行层——表驱动不碰确认门。且 3 条分支有精确断言（roi__calc 摘要逐字钉住、roi__set_plan_params 兜底回归、写暂存顺带只读查询回归）。
+- **Fails if：** 表驱动丢失无覆盖分支的隐藏语义：(1) 分发键不统一——首分支按 `x-action` 元数据（get_state，service.py:156-157），其余 7 条按全名；(2) 每分支特有编排：forecast__set_scenario_params 4 次 HTTP+合并+`.replace("挑战", sc)` 字符串技巧；roi__calc 省参时双取默认；coupon__list_runs 对 list/dict 双形状容错；兜底 `return f"已执行 {name}"` 是未来 action 的安全网。而这 4 条（get_state×3、forecast__calc、coupon__list_runs、coupon__compare）**没有任何 fixture 驱动**（EchoBackend FIXTURES 只含 3 个 action；FakeHttp 对未预期路径 AssertionError）。
+- **Kill criterion：** 表驱动 diff 触及 4 条无覆盖分支且未先补执行测试——该项剔除或降级为"只拆函数不改分发结构"。
+- **Cheapest test：** 动工前照 `test_roi_set_plan_net_none_guard` 模式补 4 条：每条一个 Echo fixture + FakeHttp 分叉，断言摘要串与调用序列，每条约 12 行。
 
-#### 3.「`topup_at_threshold` 是普通局部标志，随 helper 返回即可」——它是跨循环迭代的粘性 OR
-- **Steelman**：合成场景所有篮子都缺省（全 True），任何合理接线都得到 True。
-- **Fails if**：`_basket_branches` 返回"本篮子标志"而 caller 直接赋值不 OR（engine.py:179-180 现为 `= True` 粘性赋值）——混合 `topup_amount_cents` 场景（部分篮子显式、部分缺省）丢失"恰好凑单"limitation（MUT2 证明 68 绿、指纹捕获）。仓库无任何测试构造混合场景。
-- **Cheapest test**：battery 加两个 mixed-topup 用例（首篮缺省 / 末篮缺省）。
-- **Kill criterion**：接线必须 `topup_at_threshold = topup_at_threshold or flag_i` 或该标志赋值原样留在 caller 循环内。
+**K4：helper 去重的事实前提本身是错的——GET 有三种语义，不是两种，且其中"不捕获 HTTPError"是被 404 测试依赖的行为**
 
-#### 4.「只搬移 ⇒ 浮点结果天然不变」——对，但风险全在"接线"而非"搬移"
-- **Steelman**：成立。CPython 提取函数不改变 FP 语义；`sum(gen)` 左折叠 == 顺序 `+=`；只要每条语句的求值序不变，结果逐位相同。真正的敏感累加是 `e_pi0`（→`pi0_total`，engine.py:244）、`l_rate`（→retention/delta_c）、`_sum(key)` 与 `_delta_vs_pi0`（均按 **ledger 行序**求和）。
-- **Fails if**：接线时重聚合——分组小计、`math.fsum`、"先收集各组再相加"、或任何 ledger 行序变化（`_sum`/decomposition/导出 CSV `export_ledger_csv` exports.py:58-68 全按行序）。MUT3 证明 1-ulp 级漂移全套件静默。
-- **Cheapest test**：指纹盯未取整字段（MUT3 被 18 用例中的 2 例捕获，覆盖已够）。
-- **Kill criterion**：实现规约明写三条红线：不引入 fsum/分组求和；不重排 ledger；每个累加器的加法项序逐句保持。
-
-#### 5.「五个 helper 签名照提案写即可」——签名草稿有字面缺陷
-- **Fails if**：照抄实现。`_conversion_response(spec, c0, retention, enabled, limitations)` **缺 `t`、`f`**——相对模式 `s_plus = min(k·(f/t), s_max)` 必需 F/T（engine.py:214）；`_decompose(ledger, pi0_by_basket)` **缺 `k_cost`**（`fixed_costs = -float(k_cost)`，engine.py:290）；桶穿检查悬在 ②/③ 边界之间，`limitations` 参数的归属未写明；`_validate_candidate` 需**返回 `(enabled, t, f)`** 并保留 `f = candidate.get("face_value_cents", 0) or 0` 的 None→0 强转与"候选校验先于 `validate_spec(spec)`"的顺序（compare.py:267-271 的 per-candidate catch 依赖 SpecError 从 simulate 内抛出；该先后顺序目前无测试钉住，保持即可）。
-- **Cheapest test**：开工前修签名草稿——比照本清单逐参数核对一遍（10 分钟）。
-- **Kill criterion**：无——这是可修缺陷，不是路径问题。
-
----
+- **Claim：** 提案：三文件 `_post`/`_get` 去重，"test_coupon_server 的 `_get` 返回 bytes、test_workbench/_assistant_http 的返回 parsed JSON"。
+- **Steelman：** `_post` 家族确实同构：四份（coupon_server `_post`/`_post_raw`、workbench `_post`、assistant_http `_post`）都是 timeout=60、JSON 体、HTTPError 捕获后返回 `(e.code, json.loads(e.read()))`——去重零风险。落点上 pytest prepend 模式把 tests/ 挂进 sys.path（无 `__init__.py`），兄弟模块 `tests/_http.py` 可直接 import，比 conftest fixture diff 更小。
+- **Fails if：** 按提案的错误地图"统一 `_get` 返回 JSON"动手。实测真相是**三种** GET：coupon_server `_get`（:26-28）与 workbench `_get`（:69-71）都返回 **bytes 且不捕获 HTTPError**（提案说 workbench 返回 JSON——错）；assistant_http `_get`（:63-65）返回 **JSON 也不捕获**；coupon_server `_get_json`（:51-56）返回 JSON **且捕获**。"不捕获"是被依赖的语义：test_workbench.py:111-120 两条 404 测试用 `pytest.raises(urllib.error.HTTPError)` 包住 `_get`。
+- **Kill criterion：** 去重方案把"抛异常 GET"与"捕获 GET"折叠成同一函数，即违反硬约束 4。
+- **Cheapest test：** 保留三个命名清晰的 GET（`_get_raw` / `_get_json` 抛异常版 / `_get_json_or_error` 捕获版）或每文件留薄包装，`_post` 四合一。
 
 ### What's Well-Reasoned
 
-- **接缝真实存在**：①②③④+4.6 的注释块与代码块对齐（engine.py:165/174/204/233/267），沿边界拆是最小 diff 路径。
-- **范围控制正确**：拒绝"顺手重构成类/管道"、拒绝"顺手修 limitations 重复 append"（proposal.md:37-38）——正是本报告第 2 条要求的纪律。
-- **公共 API 面干净**：grep 证实只有 `compare.py:11`、`stress.py:13`、`__init__.py:9` 导入 engine，且只取 `simulate`/`SimulationResult`——约束3 无暗礁。
-- **验证网比提案自述的更强**（±1 分而非 ±100 分）——抓公式级错误绰绰有余，缺口只在比特级。
-- **浮点搬移本身安全**（见 K4 steelman）——这是该计划敢于承诺逐位不变的正当理由。
+- **NaN 负向测试不仅可构造，而且有免 mock 的合法输入配方——提案开放问题直接关闭（红队已端到端复现）。** `_check_semantics` 只查 `amount_cents > 0`（spec.py:133）无上界：`synthetic_spec_dict()` 改 `baskets[0]["amount_cents"] = 2*10**306`，`load_spec` strict 通过；`pi_coupon` 与 `pi0_total` 各自浮点 silent 溢出为 `inf`，`delta_pi = inf − inf = nan`（实测 `incremental_contribution_cents = nan`）；`json_bytes(allow_nan=False)` 抛 `ValueError`（httpkit.py:25），被 `route_post` 捕获（server.py:334-335）。真机 HTTP 实测：**422 `{"error": "请求不合法：Out of range float values are not JSON compliant"}`**——正是阶段1 deliberate-change #5 的语义。注意配方边界：让**乘积**溢出（单项 float ≤1.8e308 可正常转换），别让转换本身溢出——`t = 10**309` 会在 engine.py:148/:298 抛 `OverflowError`，不在 route_post 捕获元组里，结果是无响应/连接重置而非 422（**本批范围外的既有空洞**，只在交接卡记录，不顺手修）。
+- **e_pi_after 删除是本仓可证零漂移的最好案例。** 全仓 grep：仅三处出现（engine.py:288 初始化、:306 未启用路径 `+=`、:316 启用路径 `+=`），零读取；`_aggregate_ledger` 收的是 `e_pi0`；tests/ 无引用。两条写路径都被 battery 覆盖（`golden_no_coupon` 走 :306，启用用例走 :316）。指纹门禁 19/19 是第二重保险。
+- **numpy 导入确认死代码。** `target_forecast/server.py:17`，文件内无任何 `np.` 使用。一行删除安全。
+- **基线绿。** 六个受影响测试文件 89 passed / 52.6s，重构起点无暗债。
 
 ### What I Couldn't Assess
 
-- 实施者纪律——只能靠指纹门禁兜底，无法事前评估。
-- 复杂度实际降幅：提案未给目标数（阶段3 先例 29/105→4/6，可预期但未承诺）。
-- "~50 行编排"是否达成：依赖签名修正后的参数列表长度（`_aggregate_ledger` 需要 ledger、n_visitors、c0、e_pi0、l_rate、d_c_plus、enabled——开放问题已自认）。
-- `e_pi_after` 的处置：它是**死累加器**（engine.py:140,158,202 只写不读；`pi_coupon` 实际来自 ledger 的 `_sum`）。提案未提。建议本阶段原样搬（守住"只搬移"字面），删除留待阶段5 单独提交。
+- 实施者纪律——K1-K3 的门禁都只有十几行，但"先门禁后动手"能否顶住 7 项一揽的完成压力。缓解：**每项独立提交 + 各自门禁先行**。
+- 前端对 errors 顺序的展示假设（按最保守口径处理：顺序即用户可见）。
+- 复杂度降幅目标数未验证。
 
-### 开工前置条件（GO 的组成部分）
+### 结论：GO（附先决条件）
 
-1. **指纹门禁**：重构前生成并封存 battery 指纹（下表 19 用例 + 桶穿+C₀=0 组合用例），重构后逐 hash 相等才算完成；照 `tests/test_httpkit_characterization.py` 先例转正为测试。注意 hash 绑定本机 Python/FP 平台，需在重构当次生成。
-2. **修签名**：③ 补 `t,f`；`_decompose` 补 `k_cost`；② 写明桶穿 limitation 归属；`_validate_candidate` 返回 `(enabled, t, f)`。
-3. **三条接线红线 + 一条保留**：limitations 就地 append（禁返回合并）；topup 标志跨篮子 OR；禁 fsum/分组求和/ledger 重排；`e_pi_after` 原样保留。
-
-**基线指纹（2026-10-15，本机 .venv，重构后须逐个相等）**
-
-```
-golden:无券 16634525229d2f2e   golden:满79减5 299c771b592a7f7d
-golden:满99减10 77e4165f6c2998d0   golden:满109减5 440df9f9dca3d613
-golden:满129减5 4859a42dcd4d4edd   golden:满139减5 5220de8e50cc8550
-golden:满139减10 197dbc7f09ba5813  golden:满139减20 151cc7fa2cc724fa
-golden:满159减5 487b0502d959979c   golden:满159减10 450c92b8c786c3a2
-noN f9b06638d064eb8f    c0zero 32360df478aed4d2    absbig 34306f00cb131d2f
-straddle+fees 100a9b19088c207a   mixed-topup-0default a9c0ad3fc12d310f
-mixed-topup-4default bc0f9797f934faa3   multinew b4b145c2e0badbc27
-qtable 06d4df090b846b6d   [组合用例 桶穿+C₀=0] dad16601057c4b99
-```
-
-（battery 覆盖：黄金表 10 候选、无 N、C₀=0、绝对 ΔC⁺ 超限、桶穿+费用+K、两个混合 topup、多新增篮子、q_mode=table、桶穿+C₀=0 组合。生成脚本即"对每用例 serialize 全量 SimulationResult 取 sha256"，约 30 行，二次运行已验证稳定。）
-
-**Verdict: GO** —— 无 kill criterion 已满足；所有已证缺口（验证门禁、签名草稿、接线红线）都有当天可完成的廉价修复，且修复后该计划的风险面收敛到"纯机械搬移"。
+1. **动工前补三组门禁**（K1 顺序钉死测试、K2 markdown sha256 封存、K3 四条分支执行测试），先对现状跑绿。
+2. **spec 拆分按连续块切，不按领域主题切**；`_check_reach(reach_base+reach_new)` 命名诱导必须显式否决。
+3. **helper 去重以实测地图为准**（三种 GET 语义 + 四份同构 `_post`），修正提案第 7 项的错误描述；落点 `tests/_http.py` 纯函数模块。
+4. **NaN 测试用已验证配方**（`amount_cents = 2*10**306`，断言 422 + "请求不合法"），不走 mock；OverflowError 空洞只记录不修。
+5. **每项独立提交**，e_pi_after 与 numpy 两项零风险可先行。

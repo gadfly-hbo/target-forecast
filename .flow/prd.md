@@ -1,86 +1,84 @@
-# PRD：重构阶段4 — coupon engine.simulate 拆分
+# PRD：重构阶段5（收官批）
 
-> 规格来源：`.flow/proposal.md`。红队报告：`.flow/red-team.md`（GO，fresh-context，含突变实验证据；三个开工前置条件全部采纳）。
+> 规格来源：`.flow/proposal.md`。红队报告：`.flow/red-team.md`（GO，5 项先决条件全部采纳；含 NaN 配方实证与 GET 语义事实纠错）。
 
 ## Problem Statement
 
-`coupon_tool/engine.py` 的 `simulate`（圈复杂度 33 / 认知 54，~220 行）把候选校验、逐篮子分支展开、转化响应、账本汇总、limitations 收集、4.6 贡献拆解六件事混在一个函数里。红队突变实验证明：现有 68 条 coupon 测试对"提取 helper 后接线"最容易犯的三类错（limitations 顺序漂移、粘性标志丢失、浮点重聚合）**全部静默放行**——"只搬移"的纪律必须有指纹级门禁兜底。
+重构方案剩余三个复杂度热点（spec._check_behavior 19/31、exports.export_markdown 15/31、assistant service._execute 11/15）+ 三项历史遗留 + 跨测试文件的 HTTP helper 重复。红队实证：三个"行为不变"重构中两个（spec errors 顺序、markdown 字节）没有任何现有测试钉住其行为面，一个（assistant）有 4/8 分支零执行覆盖——照搬前四阶段"先门禁后重构"的纪律是本批成立的前提。
 
 ## Solution
 
-沿既有子模型注释边界提取五个私有函数，`simulate` 变成编排；重构前封存 19 用例的逐字段 sha256 指纹，重构后逐 hash 相等作为硬验收。
+七项任务、每项独立提交、门禁先行：三组 characterization/封存测试对现状先绿（spec 顺序钉死、markdown sha256、assistant 分支执行），随后三项行为不变重构 + 两项零风险清理 + NaN 负向测试 + helper 去重（以红队实测的三种 GET 语义地图为准）。
 
 ## User Stories
 
-1. As a 维护者，I want 四个子模型各自是命名函数，so that 改动局部化、边界可审计
-2. As a 审查者，I want 指纹门禁（19 用例逐 hash 相等），so that "只搬移不改算术"是可证伪断言
-3. As a 运营用户，I want limitations 列表顺序逐位不变，so that 前端 warn-card 与导出摘要的提示顺序不漂移
-4. As a 下游消费者（compare/stress/exports），I want `simulate`/`SimulationResult` 公共 API 与数值完全不变，so that 零适配
+1. As a 维护者，I want `_check_behavior` 按连续块拆成小函数，so that 校验规则可局部阅读且 errors 顺序零漂移
+2. As a 运营用户，I want 导出的决策摘要 markdown 字节级不变，so that 历史对比与归档不失效
+3. As a 助手用户，I want assistant 的 8 条 action 分发语义不变，so that 问答/调参行为零变化
+4. As a 审查者，I want 三组门禁（顺序字面量 / markdown sha256 / 分支执行测试）先行封存，so that "行为不变"可证伪
+5. As a 维护者，I want HTTP 测试 helper 只有一份，so that 新测试不复制第三种 GET 语义
+6. As a 维护者，I want NaN 引擎输出被 422 拒绝的行为有测试钉住，so that 阶段1 deliberate-change #5 的语义不回退
 
 ## Implementation Decisions
 
-1. **五个私有函数**（签名按红队修正）：
-   - `_validate_candidate(candidate) -> (enabled, t, f)`：保留 `f = candidate.get("face_value_cents", 0) or 0` 的 None→0 强转；保留"候选校验先于 `validate_spec(spec)`"的顺序（compare 的 per-candidate catch 依赖）
-   - `_basket_branches(spec, bk, i, t, f, limitations) -> (branches, loss_i, topup_default_used)`：子模型①② + 桶穿 limitation append（就地，红队 K2/红线）
-   - `_conversion_response(spec, t, f, c0, retention, enabled, limitations) -> d_c_plus`：子模型③（含 t/f，红队 K5）
-   - `_aggregate_ledger(ledger, n_visitors, c0, e_pi0, l_rate, d_c_plus, k_cost) -> metrics`：子模型④（GRILL Q4 修正：k_cost 提升到 simulate 计算，签名去掉 enabled——metrics 段只在此处用它）
-   - `_decompose(ledger, pi0_by_basket, k_cost) -> decomposition`：4.6（含 k_cost）
-2. **接线红线**（红队条件③，写进提交说明）：
-   - limitations 一律**就地 append 传引用**，禁止 helper 返回列表再合并
-   - `topup_at_threshold` 为跨篮子粘性 OR：caller 侧 `topup_at_threshold = topup_at_threshold or topup_default_used`（或赋值语句原样留在循环内）
-   - 禁止 `math.fsum` / 分组小计 / 任何 ledger 行序变化；每个累加器（e_pi0 / l_rate / e_pi_after / _sum / _delta_vs_pi0）的加法项序逐句保持
-   - `e_pi_after` 是死累加器（只写不读）——**原样搬移保留**，删除留阶段5
-3. **指纹门禁**（红队条件①）：重构前在本机生成 battery（黄金表 10 候选 + noN + c0zero + absbig + straddle+fees + 两个 mixed-topup + multinew + qtable + 桶穿+C₀=0 组合，共 19 用例），每用例序列化全量 `SimulationResult`（`json.dumps(..., sort_keys=True)`）取 sha256 封存；重构后逐 hash 相等。转正为 `tests/test_engine_fingerprint.py`（先例：阶段1 characterization），docstring 注明 hash 平台绑定（CPython/IEEE754 双精度下稳定；异机失败=真实 FP 差异信号，可重生成）。与红队基线的交叉核对：红队生成脚本未留存，12 个用例（黄金 10 + noN + c0zero）已实证可复现——对这 12 个断言 `hexdigest.startswith(红队16位)`；其余 7 个（multinew/qtable/absbig/straddle+fees/两个 mixed-topup/组合）fixture 参数不可考，红队旧 hash 仅作 docstring 历史参考，本机重新封存为准（GRILL Q1 修正——原"应逐一相同"条款不可满足）。
-4. **零 deliberate-change**：`SimulationResult` 字段、metrics 键序、ledger 行序、limitations 顺序、导出文件内容全部逐位不变。
-5. 模块级 `simulate`/`SimulationResult`/既有私有助手（`_q_i`/`_row`/`_variable_fee`/`_per_basket`/`_baseline_basket_rows`）不动。
+1. **A1 spec._check_behavior 拆分**：**按连续代码块切**（红队 K1：领域主题切分会把 reach_new 从循环错误后移到前——errors 顺序即 API 文案）。切分边界：①四名字概率循环（:177-184）②reach_new（:185）③q_mode/q_curve/q_table（:186-196）④conversion（:197-208）⑤new_basket（:209-219）。五个块函数按原顺序在 `_check_behavior` 内依次 extend；**门禁先行**：构造触发 ≥4 类错误的 fixture，断言 `validate_spec(spec)["errors"]` 精确等于完整列表字面量。errors 与 warnings 无混排（红队确认：warnings 全在 validate_spec）。
+2. **A2 export_markdown 拆分**：按输出段落拆 `_section_*` 渲染函数；`add("")` 空行与 `---` 分隔线归属跟随段落；**门禁先行**：sha256 封存（decision 有/无 × stress 有/无 ≥2 形态，run_id 归一后 inline 哈希）。
+3. **A3 assistant _execute 表驱动**：**门禁先行**：先补 4 条零覆盖分支的执行测试（get_state×3 工具共享分支、forecast__calc、coupon__list_runs 双形状、coupon__compare），照 `test_roi_set_plan_net_none_guard` 模式（Echo fixture + FakeHttp 分叉 + 摘要断言）。表形状：`{(tool_id, action): handler}` 或按现有 `x-action` 元数据 + 全名两级查键——保留 get_state 元数据优先判定顺序与兜底 `已执行 {name}`。
+4. **B1 NaN 负向测试**（阶段1 遗留）：红队实证配方——`baskets[0]["amount_cents"] = 2*10**306` 经 `/api/compare` → 422 且 error 以"请求不合法"开头。**OverflowError 空洞（threshold=10**309 → 无响应）只记录交接卡不修**（范围外既有行为）。
+5. **B2 e_pi_after 删除**（阶段4 红线保留项）：三处写零读，删除后指纹 19/19 必须仍绿（第二重保险）。
+6. **B3 numpy 导入删除**：`target_forecast/server.py:17` 一行。
+7. **C1 helper 去重**：新建 `tests/_http.py` 纯函数模块（prepend 模式可直接 import；不用 conftest fixture——放大 diff）。**以红队实测地图为准**：`_post` 四合一（timeout=60、JSON、捕获 HTTPError）；GET 保留**三种**命名清晰的语义——`get_raw`（bytes、抛 HTTPError）/ `get_json`（JSON、抛 HTTPError）/ `get_json_or_error`（JSON、捕获）——三文件改 import，各自调用点不改语义。**"抛异常 GET"是被 test_workbench 404 测试依赖的语义，禁止折叠**。
+8. **提交粒度**（红队条件⑤）：每项独立提交——三组门禁测试可合一个 `test` 提交或随各自重构提交先行；顺序建议：门禁→A1→A2→A3→C1（test-only）→B1（test-only）→B2+B3（零风险清理，一个提交）。
 
 ## Testing Decisions
 
-- **指纹测试先于重构落地并先绿**（对现状代码），重构后不变即绿。
-- 回归：`pytest tests/test_coupon_engine.py tests/test_coupon_stress.py tests/test_coupon_compare.py tests/test_coupon_server.py`（server 含黄金数值 ±1 分与对平断言）
-- 复杂度复查：图谱 query_graph，`simulate` 拆分后 ≤10/15（阶段3 先例），无 ≥15 残留
-- 全量 `pytest` 195+19（指纹 parametrize 逐用例）条全绿
+- 好测试 = 外部可观察行为（errors 列表字面量、markdown sha256、摘要串与调用序列、HTTP 状态码与错误文案）。
+- 三组门禁对现状先绿后再动各自的生产代码；指纹门禁（tests/test_engine_fingerprint.py）在 B2 前后各跑一次。
+- 回归：全量 `pytest`（当前基线 214 passed；本批新增约 8-10 条测试）。
+- 复杂度复查：图谱 query_graph，三个目标函数拆分后无 ≥15 残留。
 
 ## Out of Scope
 
-- `e_pi_after` 死累加器删除、limitations 重复 append 模式整理——阶段5
-- spec/exports/assistant 的复杂度问题——阶段5
-- compare.py 的候选级 SpecError 吞噬语义——现状保留
+- OverflowError 空洞修复（记录）
+- report.py 第三份 concat（阶段2 已划出）
+- 前端静态文件、引擎数学、compare 的候选级 SpecError 吞噬语义
+- 校验规则表驱动化（原方案"可选不必做"）
 
 ## PRD diff gate（相对 proposal.md 的差异）
 
 proposal 硬约束全部保留。差异：
 
-1. **开放问题 1 拍板**：limitations **就地 append 传引用**（helper 签名带 `limitations`），返回-合并方案否决。（红队 K2，MUT1 证据）
-2. **开放问题 2 拍板**：`_basket_branches` 返回 **tuple** `(branches, loss_i, topup_default_used)`，不引入 dataclass。（最小 diff）
-3. **开放问题 3 拍板**：子模型③ 签名带 `limitations` 就地 append，同时补 `t, f` 参数。（红队 K5 签名缺陷修正）
-4. **开放问题 4 拍板**：`_aggregate_ledger` 接受长参数表（红队确认无碍）。
-5. **新增**：指纹门禁（红队条件①，MUT 实验证实现有测试不充分）。
-6. **新增**：接线红线清单与 `e_pi_after` 原样保留的决定（红队条件③）。
-7. **修正**：提案称黄金数值"±100"——实为 ±1 分（TOL_CENTS=1），验证网比自述更强，但比特级缺口靠指纹补。
-
----
+1. **A1 拆分方式修正**：提案开放问题 1 的"按校验主题"被**显式否决**——按连续块切（红队 K1：主题切分重排 errors 文案，无测试钉住，属违反硬约束 2 的诱导）。
+2. **A3 增加前置**：4 条分支执行测试先行（红队 K3：无人区作业禁止）。
+3. **C1 事实修正**：提案"两种 GET"错误——实为三种语义且"不捕获"被测试依赖；落点拍板 `tests/_http.py`（红队 K4）。
+4. **B1 配方拍板**：红队实证的 2×10³⁰⁶ 配方，否决 mock 路线；OverflowError 空洞显式记录不修。
+5. **新增**：每项独立提交的粒度要求（红队条件⑤）。
 
 ## GRILL 决议
 
-### 第 1 轮（author-blind 子代理，2026-10-15，7 个已决问题包，含红队 hash 实证复现）
+### 第 1 轮（author-blind 子代理，2026-10-15）
 
-- **Q1 交叉核对条款修正**：红队生成脚本未留存——12 用例（黄金10+noN+c0zero）断言 `hexdigest[:16] == 红队值`（griller 已实证复现一致）；其余 7 用例本机重新封存，红队旧 hash 记 docstring 作历史参考。PRD 原文已改。
-- **Q2 七个变体用例的 fixture 定义表**（记录在案的定义基准，每用例同时断言目标 limitation 文案在场，防退化 battery 静默封存）：
-  - absbig：conversion={"mode":"absolute","delta_c_plus":0.95}（>上限触发 engine.py:212）
-  - straddle+fees：篮子A=110 桶界 [10000,14000] + fixed_fee_cents=100/fee_rate=0.01/fixed_activity_cost_cents=50000
-  - mixed-topup-0default：篮子1-4 topup_amount_cents=20000、篮子0 缺省，t=20000 全落②
-  - mixed-topup-4default：篮子4 缺省其余显式（专打粘性 OR，MUT2 盲区）
-  - multinew：默认相对转化 + 双条目 new_basket（权重 .6/.4）
-  - qtable：q_mode=table + 2-3 行 q_table（gap_max/ftr_max）
-  - 组合：c0=0.0 且 A=140 桶界 [13000,15000]（同时触发 :193 与 :218，MUT1 杀手）
-- **Q3 指纹存储**：inline 字典字面量（先例 test_httpkit_characterization.py；tests/ 无 __init__.py 不可跨文件 import；不进 synthetic.py 扩公共面）；存完整 64 位 hexdigest；pytest parametrize 按用例名 → 19 个测试项。
-- **Q4 签名再修正**：k_cost 计算提升到 simulate（条件常量纯搬移），`_aggregate_ledger(ledger, n_visitors, c0, e_pi0, l_rate, d_c_plus, k_cost)`，去掉 enabled。PRD 原文已改。
-- **Q5 第六/第七块归属**：新增成交块（engine.py:220-231）与六个尾部 limitation append（:254-265）**原样留在 simulate**（读 caller 专属状态；保持现有相对位置即保序），不加第六个 helper。
-- **Q6 闭包去向**：`_sum` 作为嵌套 def 随 `_aggregate_ledger`、`_delta_vs_pi0` 随 `_decompose`——逐字节搬移，不新增模块级名字。
-- **Q7 提交粒度**：三提交——①`test(coupon): 指纹门禁封存`（对未重构代码绿，可审计"先封存"出处）②`refactor(coupon): simulate 拆五函数` ③`docs(flow): 阶段4交接卡`。
-- **已钉死**：validation/vres 留 simulate；模块 docstring 不动；e_pi_after 保留/红线/19 用例成员/复杂度目标 ≤10/15；_basket_branches 可行（n_baskets 从 spec 可推导）。
+- 见附录（若与本 PRD 正文冲突以正文为准）。
 
 ### 第 2 轮（主代理）
 
-枚举零新增开放问题——**GRILL converged after 2 rounds**。
+- 枚举零新增开放问题（七项的门禁、边界、提交序全部由红队条件+本 PRD 钉死）——**GRILL converged after 2 rounds**。
+
+---
+
+## GRILL 决议（替换占位）
+
+### 第 1 轮（author-blind 子代理，2026-10-15，7 包全按推荐 (b) 采纳）
+
+- **Q1 门禁A1 fixture**：五块全覆盖 + 块内多错误——`build_synthetic_spec()` 后**直接改 dataclass**（绕开 load_spec 的 float() 强转陷阱）：`redeem_natural=1.5, reach_new=1.5, q_mode="banana", q_curve={q_cap:1.5,lam:-1,d_ref:-1}, conversion={mode:relative,k:-1,s_max:-1}, new_basket=[{weight:0.6,amount_cents:"x",redeem:2}]`；断言 `validate_spec(spec)["errors"]` 精确等于完整字面量（基线/cost/constraints 干净 → errors 恰为 _check_behavior 输出）。
+- **Q2 门禁A2 归一**：`run["run_id"] = "run-SEALED"` 在 dict 层覆写后再调 export_markdown（单点归一、无行格式耦合）；created_at 不渲染，run_id 是唯一非确定性。
+- **Q3 门禁A2 形态**：3 形态——对角两形态（stress+decision 全开 / 全关）+ top 缺席形态（`{**run, "results": {**r, "ranking_rows": []}}` 手工截断——export_markdown 是 run dict 纯函数，合法 characterization）；新文件 `tests/test_exports_seal.py`；top 内部 else 分支（breakeven/decomposition/neighbors 缺席）记为接受的残余（substring 冒烟覆盖）。
+- **Q4 A3 表形状**：两级——保留 `x-action == "get_state"` 元数据快路径原样，仅把 6 条全名 if/elif 换 `{name: handler}` dict（handler 为 `(service, args) -> str`），兜底 `已执行 {name}` 不变。action id 跨工具不唯一（forecast/roi 都有 calc），单键表否决。
+- **Q5 C1 模块 API**：`tests/_http.py` 导出 `post(url, obj)` + `post_raw(url, data)`（共享响应处理）+ 三种 GET（get_raw / get_json 抛异常 / get_json_or_error 捕获）；`_post_raw` 不做 isinstance 多态合并。
+- **Q6 C1 范围修正（两行）**：`tests/test_server.py` 的 `_get`（与 get_raw 语义逐字节相同）改 import get_raw；其**抛异常**的 `_post` 保持本地（无人需要的第 4 种语义）。这是对 PRD"三文件"的唯一范围扩展，随本决议批准。
+- **Q7 提交序**：交错式——gate(A1)→A1→gate(A2)→A2→gate(A3)→A3→C1→B1→B2+B3，每个封存对未重构代码可审计先绿（阶段4 先例）。
+- **已钉死无需提问**：B1 配方、B2 三写零读、B3、A1 五块边界（红队已核行号）、FakeHttp 模式、214 基线算术。
+
+### 第 2 轮（主代理）
+
+零新增开放问题——**GRILL converged after 2 rounds**。

@@ -1,30 +1,15 @@
-# REVIEW 发现（阶段4，2026-10-15，fresh-context 子代理——配额已恢复）
+# REVIEW 发现（阶段5，2026-10-15，fresh-context 子代理）
 
-## Verdict: **PASS**（0 blocking；3 non-blocking）
+## Verdict: **PASS**（0 blocking；5 non-blocking）
 
-## 独立验证（审查者自带沙箱复核）
+复跑 verify：`.venv/bin/python -m pytest -q` → exit 0, 223 passed in 101.33s（与记录 104.46s 数量一致）。七项猎杀全净：五块 errors 顺序由 12 条字面量钉死且为逐字搬移；markdown 三形态 sha256 门禁文件自封存提交后零改动（字节同一性成立）；_EXECUTORS 两级分发与兜底原样、4 新测试走真表；三种 GET 语义保留且 test_server 抛异常 _post 留本地；e_pi_after 零读残留、指纹 19/19；门禁→重构交错纪律成立；无超范围。
 
-| 声明 | 复核结果 |
-|---|---|
-| 全量 214 passed | 214 passed in 97.72s, exit 0 |
-| 指纹 19 passed | 19 passed in 0.04s |
-| 封存时引擎未重构 | **实证**：沙箱内 `git show 454c537` 的旧引擎复现全部 19 个 EXPECTED digest + 12 个红队前缀 |
-| 跨重构逐位一致 | 旧引擎 19/19、新引擎 19/19 → 输出逐位相同（不信任 flow 自述的独立证明） |
-| SANITY 守卫真实触发 | 5/5 退化构造使断言翻 False（防退化 battery 是活的） |
-| 语句级等价 | AST multiset diff：全部 delta 为纯接线/逐字搬移；**无任何运算符/常数/操作数序变化** |
-
-Spec 轴五项猎杀全部干净（early-return ≡ d_c_plus=0.0、桶穿守卫 enabled 恒真属死条件移除、retention 重算纯确定性、k_cost 提升经 Q4 授权、metrics 先建无 limitations 依赖——顺序可证保持：缺N→桶穿→③→六 append，④/4.6 零 append）。任务 2 的 15/19 偏差裁定：**Q5 钉死块贡献 ~8-10 决策点，≤10 算术上不可达——豁免成立，且已公开记录而非粉饰**。
-
-## Non-blocking 发现及处置
+## Non-blocking 及处置
 
 | # | 发现 | 处置 |
 |---|---|---|
-| N1 | `.flow/gen_fingerprint.py` 红队键名陈旧（golden_79_5 vs battery 的 golden_7900_500），重封存时只核对 3/12 却打印 "12/12" | **已修复**：键名对齐 battery + 断言命中数==12 后才打印；复跑 12/12 |
-| N2 | tasks 证据 "无 >15" 与 PRD "无 ≥15" 措辞漂移；15/19 是图谱工具口径（radon 口径 simulate=31） | 交接卡中统一表述：以图谱口径 15/19 记录 + Q5 偏差说明，标注工具约定 |
-| N3 | retention/conv/h 的轻度重复推导（冻结签名所迫） | 不处理——现在去重会破坏指纹纪律，留阶段5 若触碰再议 |
-
-## 复核准则
-
-- N1：重跑 gen_fingerprint.py 打印 12/12 且有命中数断言——已满足
-- N2：handoff 措辞修正——SHIP 时满足
-- N3：`grep -n "retention = 1.0" coupon_tool/engine.py` == 2——记录在案
+| F1 | A1 实为**四**函数（①+②合并 _check_reach_and_churn），PRD/tasks 写"五块函数"——形状偏差非行为偏差 | 已修 tasks.md 措辞 |
+| F2 | gate A3 的 a2bdd9d 单提交曾红（FakeHttp3 双记录），由 2c9f213 在重构前修复——对级绿非提交级绿 | 记录（tasks.md 本就诚实记录两提交） |
+| F3 | seal 注释"未知模式+非法曲线" overstated——banana 模式下 curve 参数惰性 | 已修注释 |
+| F4 | _section_stress 未用 top 参数（原块也未读） | 已删（封存 3/3 复绿） |
+| F5 | 各提交历史计数未逐提交复跑（只读约束） | 接受——SHIP 两拍全量复跑为最终门禁 |
