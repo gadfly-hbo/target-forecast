@@ -186,3 +186,16 @@ def test_review_endpoint_closes_loop(base_url):
     # 缺字段被拒
     status, res2 = _post(base_url + "/api/review", {"run_id": rid, "actuals": {}, "notes": {}})
     assert status == 422
+
+
+def test_compare_nan_output_rejected_as_422(base_url):
+    """阶段1 deliberate-change #5 的负向门禁：引擎产出 NaN/Inf 时由
+    allow_nan=False 序列化失败 → 外层 ValueError → 422"请求不合法"，
+    而非 200+非法 JSON 体。配方：金额乘积浮点溢出为 inf，ΔΠ=inf-inf=nan。"""
+    _, demo = _post(base_url + "/api/demo", {})
+    scenario = demo["scenario"]
+    scenario["baseline"]["baskets"][0]["amount_cents"] = 2 * 10**306
+    status, out = _post(base_url + "/api/compare", {"scenario": scenario})
+    assert status == 422
+    assert out["error"].startswith("请求不合法")
+    assert "not JSON compliant" in out["error"]
