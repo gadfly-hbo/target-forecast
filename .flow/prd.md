@@ -1,107 +1,82 @@
-# PRD：重构阶段1 — HTTP 基础设施收敛（httpkit）
+# PRD：重构阶段2 — target_forecast pipeline 收敛
 
-> 规格来源：`.flow/proposal.md`（2026-10-15 重构方案的阶段1）。红队报告：`.flow/red-team.md`（GO，有条件）。
+> 规格来源：`.flow/proposal.md`。红队报告：`.flow/red-team.md`（GO，三个开工前修订已全部采纳进本 PRD）。
 
 ## Problem Statement
 
-仓库内 4 个基于标准库 `http.server` 的 server（coupon_tool / target_forecast / roi_tool 三个工具 + workbench 壳）各自拷贝了同一套 HTTP 管道代码（`_Responder`、`_json_bytes`、`make_handler`/`serve` 模板、assistant_params 读写、静态文件服务）。拷贝已经开始各自漂移：
-
-- forecast 的 `json()` 独有 `allow_nan=False`，coupon/roi 没有——同一工作台三种 NaN 行为
-- 壳 `_send` 缺 `Cache-Control: no-store`，工具端有
-- 路径穿越防护只有壳有，工具端没有
-- forecast 缺失静态文件走 broad except 回 500，coupon/roi 回 404
-- forecast `/api/calc` 内联读 body，绕过 `read_body()`，是第三份读体实现
-- roi_tool 的 `serve()` 无调用方，是半死代码
-
-每修一个公共行为（安全头、错误形状）要改 4 处且必然漏改——漂移正在复利。
+`main.py`（CLI 一次性流程）与 `target_forecast/server.py`（工作台缓存+懒算）维护同一段业务逻辑的两份拷贝：config 加载、输入扫描、模式 A/B ingest 循环、三视角 concat 汇总。改汇总口径要改两处且必然漂移；红队实测确认其中一处（`cfg["caliber"]` 原地变异喂给报表 07_参数 sheet）已经是"靠副作用才正确"的脆弱状态。
 
 ## Solution
 
-新建顶层包 `tools_common/`（红队拍板：否掉 `workbench/` 放置，保持壳→工具的单向依赖，独立工具入口不背壳包），收敛一份 HTTP 管道实现；3 个工具 server 全量切换，workbench 壳仅复用其中的 Responder 部分（壳的注册表分发与 sidecar 生命周期不套工厂）。
+在 `target_forecast/` 内新建 `pipeline.py`，提取四个共用函数，两个调用方（main.py CLI、server.py WorkbenchState/calc）变成薄壳；server.py 的公开符号（`load_cfg`/`WorkbenchState`/`route_*`/`make_handler`/`serve`）保持不变，壳插件与测试零改动。
 
 ## User Stories
 
-1. As a 维护者，I want HTTP 响应发送/JSON 序列化/请求体读取只有一份实现，so that 修行为只改一处
-2. As a 维护者，I want 静态文件服务统一带路径穿越防护，so that 工具端与壳的安全水位一致
-3. As a 维护者，I want JSON 序列化的 NaN 策略全局统一为 `allow_nan=False`，so that 非法 JSON 不会流到前端才炸
-4. As a 维护者，I want assistant_params 的 load/save/merge 只有一份实现，so that 落盘格式永不分叉
-5. As a 维护者，I want roi 的未知计划名 422 守卫留在工具路由层，so that 收敛不冲掉防 LLM 幻觉落盘的保护
-6. As a 维护者，I want 每个 server 的公开签名（`make_handler(state, cfg)` 等）不变，so that 现有测试与启动脚本零改动
-7. As a 维护者，I want 独立工具入口（`main.py serve`、`python -m coupon_tool`）不依赖 workbench 包，so that README 承诺的"独立自治"保持成立
-8. As a 审查者，I want 重构前有一组 characterization 测试钉住现状行为（响应头、404 体形状、缺失静态文件状态码、serve 冒烟），so that 重构的行为变化是显式清单而非意外
-9. As a 维护者，I want 行为漂移的收敛方向逐条记录（deliberate-change 清单），so that review 能区分"有意统一"与"意外破坏"
+1. As a 维护者，I want 输入扫描（glob xlsx 排除 ~$）只有一份实现，so that 改输入约定只改一处
+2. As a 维护者，I want 模式 A/B 的 ingest 循环只有一份实现，so that 新增 ingest 模式不会只在一端生效
+3. As a 维护者，I want 三视角 concat + consolidate + platform_annual 只有一份实现，so that 汇总口径永远一致
+4. As a 维护者，I want server 的"缓存 ingest、按需 calc"两段式不被破坏，so that `/api/state` 不需要跑引擎、`reload=1` 的失败面不扩大
+5. As a 维护者，I want main.py 的逐平台进度打印与警告回放逐字节不变，so that CLI 用户体验零漂移
+6. As a 维护者，I want `main.py run` 落盘的 xlsx 07_参数 sheet 保留 target_months 行，so that 报表内容零漂移
+7. As a 维护者，I want 空输入策略分叉保留在两壳（main.py sys.exit / server 自动生成 demo），so that 两个入口的既定语义不变
+8. As a 审查者，I want 固定输入下的基线 diff（控制台 + CSV + xlsx 逐 sheet），so that "零漂移"是可证伪的断言而非口头承诺
 
 ## Implementation Decisions
 
-1. **新包 `tools_common/`**（`__init__.py` + `httpkit.py`）。壳与三个工具都正向依赖它；依赖方向保持 tools_common ← 工具 ← 壳，无环。
-2. **httpkit 提供四个组件**：
-   - `Responder(handler)`：`send` / `json`（`ensure_ascii=False, allow_nan=False`）/ `read_body` / `static`（带穿越防护）。取现有最严实现为准。
-   - `json_bytes(obj)`：单一序列化入口。
-   - `make_dispatch_handler(handle_get, handle_post)` 工厂：生成安静模式的 Handler 类，404 回 JSON `{"error": "not found"}`。各 server 保留薄包装函数以钉住现有签名（测试已冻结它们）。
-   - `serve_quiet(handler_factory, port, banner)`：ThreadingHTTPServer + 启动横幅 + KeyboardInterrupt 安静退出的公共模板。
-   - `AssistantParamsStore(path)`：load / save / merge（`setdefault(key).setdefault(name).update` 形状）。校验（如 roi 的未知计划名 422）留在各工具路由层。
-3. **范围**：coupon_tool / target_forecast / roi_tool 三个 server 全量切换；workbench 壳**仅**把 `_send`/`_json_bytes` 调用点替换为 httpkit 组件，壳的 `make_handler`（注册表前缀分发 + assistant 端点）与 `serve`（sidecar 生命周期、SIGTERM 转换）不改结构。
-4. **deliberate-change 清单**（统一后有意改变的行为，实施时写入提交说明与 tasks.md）：
-   - 壳所有响应增加 `Cache-Control: no-store` 头
-   - forecast 独立模式 404 体从 `text/plain "not found"` 变为 JSON `{"error": "not found"}`（与壳内分发行为对齐）
-   - forecast 缺失静态文件从 500 变 404
-   - forecast `/api/calc` 读体改走统一 `read_body()`
-   - coupon/roi 的 JSON 响应统一 `allow_nan=False`：引擎产出 NaN/Inf 时从"200+非法 JSON 体"变为序列化异常（coupon 的 route_post broad except 会报 422——接受该语义，前端本来就无法解析非法 JSON）
-   - roi_tool 的 `serve()` 保留但改为调用公共模板（不删——避免顺手清理超范围；标记半死状态即可）
-5. **不触碰**：三个引擎的数学、插件协议（registry manifest 契约）、assistant/sidecar 路径、静态前端文件。
-6. **目标口径修正**（红队实测）：毛删 ~190 行、净删估 50-90 行；立项价值锚定为"收敛漂移、单一事实源"，不以 LOC 验收。
+1. **新建 `target_forecast/pipeline.py`**（红队口径：放 aggregate.py 还是新模块无正确性差异；新建 pipeline.py 语义最准——ingest 编排不是 aggregate）。四件套：
+   - `scan_inputs(root) -> (detail, agg)`：两目录 glob `*.xlsx` 排除 `~$`。只扫描，不含空输入策略（分叉留在调用方）。
+   - `ingest_platforms(detail, agg, caliber, on_progress=None) -> platforms`：模式 A（load_detail→classify_new→order_level→to_unified→goods_structure）与模式 B（load_agg→to_unified）循环；**只 ingest 不算引擎**。`on_progress(platform, mode, unified)` 回调供 main.py 进度打印（点位与现状咬合顺序一致）。返回 `{platform: {"mode", "unified", "structure"}}`——正是 server 缓存的形状。
+   - `run_engine(platforms, scenarios, caliber) -> results`：逐平台 `engine.run`，返回 `{platform: {"mode", "unified", **engine.run(...)}}`——正是 main.py run_flow 内 results 的形状。
+   - `build_views(results) -> dict`：三视角 concat（main_view 选择）+ baselines + `aggregate.consolidate` + `aggregate.platform_annual` + `report._build_check_sheet` + `report._build_goods_sheet`，返回 main.py 与 server.calc 都消费的字典。
+2. **`cfg["caliber"]` 原地变异显式保留在 main.py 壳**：`run_flow` 开头继续 `cfg["caliber"]["target_months"] = cfg["target"]["months"]`（红队实测：write_report 的 07_参数 sheet 遍历 `cfg["caliber"]`，该行靠此副作用存在）。server.calc 保持拷贝式（`{**cfg["caliber"], ...}`）不动。此不对称在 pipeline.py docstring 中记录原因。
+3. **main.py 薄壳**：`_collect_inputs` 删除改调 `scan_inputs`；`load_cfg` 删除改 import server 的（server.load_cfg 保留原位，plugin.py 与测试 import 不变）；run_flow = scan → 空输入 sys.exit（保留）→ caliber 变异 → ingest_platforms(on_progress=打印) → run_engine → build_views → 写 CSV/报表 → 控制台摘要。`warnings.catch_warnings` 包裹保持在 main() 现状位置，共用层不得含 warnings 过滤。
+4. **server.py 薄壳**：`WorkbenchState.load` 的扫描+循环改调 `scan_inputs` + `ingest_platforms`（demo 自生成与 `demo_used` 逻辑保留在 load 内原位）；`calc()` 的引擎循环改调 `run_engine`，汇总段改调 `build_views`。公开符号签名全部不变。
+5. **目标表述修正**（红队"What I Couldn't Assess"）：report.py 内 `write_report` 还有第三份 concat 拷贝（report.py:77-86），本阶段不动它——目标精确化为"**调用方薄壳化**"，不是"全仓库 concat 只剩一份"。
+6. **零行为漂移清单**（除以下外不允许任何差异）：无 deliberate-change——本阶段要求行为逐字节等价。
 
 ## Testing Decisions
 
-- 好测试 = 只断言外部可观察行为（状态码、响应头、响应体形状、落盘文件内容），不断言内部实现。
-- **先补 characterization 测试再动手**（`tests/test_httpkit_characterization.py`）：
-  1. 每 server 一个端点的 `Cache-Control: no-store` 响应头现状断言
-  2. 独立 handler 的 404 体形状现状断言
-  3. forecast 缺失静态文件的现状状态码
-  4. demo 全流程响应可被 `json.dumps(..., allow_nan=False)` 序列化（coupon compare / roi calc / forecast calc）
-  5. coupon 独立入口 `python -m coupon_tool` 冒烟（import 守卫：`coupon_tool.server` 不 import `workbench.*`）
-  6. 各 server `make_handler` 薄包装签名冒烟（已被现有测试钉住，确认即可）
-- 重构后：除 deliberate-change 清单条目外，characterization 测试必须仍绿。
-- 回归套件：`pytest tests/test_server.py tests/test_coupon_server.py tests/test_workbench.py tests/test_assistant_http.py`（红队实测 baseline 54 passed / 56s）。
-- 既有守卫测试必须保持绿：`test_roi_rejects_unknown_plan_name`（roi 422 守卫）、`test_confirm_write_real_loopback`（落盘 JSON 格式不变）。
-- 手动验证（无自动化覆盖的路径）：`python -m workbench serve` 起壳一次，确认三个工具页面加载；`main.py demo` 跑通。
+- 好测试 = 固定输入下的可证伪对比；本阶段以"基线 diff"为主验证（重构是等价变换）。
+- **开工前先建基线**（红队修订①，因 demo 种子 `hash(platform)` 跨进程随机、test_core.py 不覆盖编排层）：
+  1. 当前 `workspace/forecast/` 已有固定输入文件——重构前跑 `main.py run`，保存控制台输出、`中间指标/*.csv` 快照、xlsx 逐 sheet pandas 快照（含 07_参数 sheet；xlsx 有 datetime 时间戳不能字节比）
+  2. 重构后同样跑 `main.py run`，控制台 diff 必须逐字节相等、CSV `diff -r` 相等、xlsx 逐 sheet `assert_frame_equal`
+- 全量 `pytest`（不是单文件）：test_core（引擎数学不变量）+ test_server（main_view/consolidated 形状/参数效应）+ test_workbench 切片3（壳内 forecast 全链路）+ test_httpkit_characterization（load_cfg/WorkbenchState fixtures）
+- 新增一条编排层测试（`tests/test_pipeline.py`）：用 tmp 合成的最小输入跑 scan_inputs/ingest_platforms/run_engine/build_views 四件套，断言形状与关键不变量（防止未来再长出第三份拷贝）
+- 空输入分叉冒烟：tmp 空目录下 `main.py run` 应 exit 报错；server `WorkbenchState.load` 应 demo_used=True
 
 ## Out of Scope
 
-- 阶段2-5（pipeline 收敛、coupon 路由表化、engine.simulate 拆分、测试 helper 去重）
-- 引入任何 Web 框架或非标准库依赖
-- roi `serve()` 半死代码的删除（仅记录）
-- 前端静态文件、引擎公式、插件协议的任何改动
-- assistant-sidecar（TS 进程）
+- engine / aggregate / report 内部数学与报表布局
+- report.py 内第三份 concat 拷贝（见决策 5）
+- demo.py 种子不确定性（记录为已知事实，不修——修它属于行为变化）
+- coupon_tool / roi_tool / workbench 壳
+- 阶段3-5
 
 ## Further Notes
 
-- 红队发现提案"工作区干净"表述不准：git 有 6 个脏条目，全部是 `.flow/` 自身过程文件（归档操作），不触及代码——baseline_dirty=[] 对代码成立。
-- 漂移点统一方向一律取最严实现（红队与提案一致）。
-- 上一轮 flow（assistant P3）产物已归档至 `.flow/archive/2026-09-27-assistant-p3/`。
+- 阶段1 产物（tools_common/httpkit）已就位，本阶段不涉及 HTTP 层。
 
 ## PRD diff gate（相对 proposal.md 的差异）
 
-proposal.md 的硬约束与阶段1范围全部保留。以下为差异点：
+proposal 硬约束全部保留。差异点：
 
-1. **目标口径修正**：proposal 称"净删约 250 行"→ 实测毛删 ~190、净删估 50-90，价值锚改为"收敛漂移"。（事实修正，非决策变更；红队实测证据）
-2. **httpkit 放置**：proposal 列为开放问题 → 拍板 `tools_common/` 顶层包。（填开放问题，红队论证依赖方向）
-3. **范围精确化**：proposal 称"四个 server 改为 import 使用" → "3 个工具 server 全量 + 壳仅复用 Responder/_json_bytes"。（红队证据：壳的 make_handler/serve 含注册表分发与 sidecar 生命周期，不适配工厂）
-4. **新增**：动工前补 6 条 characterization 测试（红队条件③）。
-5. **新增**：deliberate-change 清单 6 条（红队盲区清单转正）。
-6. **新增**：`AssistantParamsStore` 只收敛 load/save/merge，工具层校验显式保留（红队 kill-assumption 5 的处置）。
+1. **函数清单修正**（proposal 开放问题 2 的收敛）：`run_platforms`（ingest+engine 合一）→ 四件套 `scan_inputs / ingest_platforms / run_engine / build_views`，server.load 只共享 ingest 半段。（红队条件③，证据：server 两段式缓存）
+2. **提取目标拍板**：新建 `pipeline.py`（proposal 开放问题 1；红队：无正确性差异，语义优先）。
+3. **caliber 原地变异**（proposal 未提）：显式保留在 main.py 壳并记录原因。（红队条件②，07_参数 sheet 的 load-bearing 副作用）
+4. **验证条款重写**：固定输入基线 diff（控制台字节级 + CSV + xlsx 逐 sheet）+ 全量 pytest，替换"test_core.py + 手动 demo 对比"。（红队条件①，demo 种子跨进程随机）
+5. **目标表述修正**：从"消除双份"精确化为"调用方薄壳化"（report.py 内第三份 concat 本阶段不动）。
+6. **新增**：空输入策略分叉显式留在两壳（红队 kill-assumption 5b）；plugin.py 为第三消费面，server.py 公开面不变（5a）。
 
 ---
 
 ## GRILL 决议
 
-### 第 1 轮（author-blind 子代理，2026-10-15，7 个已决问题包）
+### 第 1 轮（author-blind 子代理，2026-10-15，6 个已决问题包）
 
-- **Q1 Responder 构造**：`Responder(handler, static_dir: Path | None = None)`，`static(name)` 要求 static_dir，resolve + 前缀检查 + is_file → 404 JSON。forecast 的 `/`、`/style.css`、`/app.js` 迁移到 `r.static(...)`；xlsx/csv 导出分支保留 raw `r.send(...)`（文件在 workspace 下，不属任何 static root；平台名穿越防护保留）。理由：构造注入让调用点保持一行，与各包绑定自有 STATIC_DIR 的现状一致。
-- **Q2 serve 退出语义**：`serve_quiet` 统一为 `try: serve_forever()  except KeyboardInterrupt: pass  finally: server_close()`。deliberate-change 清单新增两条：forecast 不再打印"已退出。"；coupon/roi 不再同线程调 `shutdown()`（改为 finally server_close）。forecast 的预加载 `state.load()` 留在其薄 serve 包装里。
-- **Q3 AssistantParamsStore**：`merge(section: str, patches: dict) -> dict`（双 setdefault 循环，返回合并后的 section，匹配两工具现有响应形状）。路径推导留在各工具（tools_common 不学 workspace 布局）。删除 forecast 模块级 `load_assistant_params`/`save_assistant_params`（无外部调用方，提交说明中记录）。roi 422 守卫保留在路由层 merge 之前。
-- **Q4 serve 冒烟机制**：(a) 子进程测试——pytest 分配空闲端口，`python -m coupon_tool serve --port N --data-dir <tmp>`，cwd=tmp_path，轮询 `/api/state` 至多 ~10s 后 terminate（唯一真 socket 路径；coupon 的 CLI 入口传递性覆盖共享 serve_quiet 模板）；(b) roi/forecast 薄 serve 包装用 monkeypatch serve_quiet 断言透传参数；(c) import 守卫单列一条。roi 无独立 server 测试文件，characterization 断言需新测试文件自行在端口 0 启动 `roi_tool.server.make_handler`。
-- **Q5 壳 `_read_json_body` 在迁移范围内**：迁到 `Responder(self).read_body()`（零行为变化，不进 deliberate-change 清单）。壳迁移全清单：10 处 `_send` + 3 处 `_json_bytes`；字节字面量错误体改为 `Responder.json(...)`（输出逐字节相同）。
-- **Q6 打包细节**：`tools_common/__init__.py` 仅一行 docstring，不做 re-export；server 显式 `from tools_common.httpkit import ...`。PRD "四个组件"措辞更正为五个（Responder / json_bytes / make_dispatch_handler / serve_quiet / AssistantParamsStore）。
-- **Q7 实施顺序与提交粒度**：一个 PR、六个提交，按风险序：① characterization 测试（先对现状跑绿）② `tools_common/httpkit.py` 无调用方 ③ roi（最小）④ coupon（SpecError/422 交互）⑤ forecast（漂移最多）⑥ 壳（仅 Responder 替换）。每次切换提交后跑四文件回归套件。tasks.md 需为本 flow 重建。
-- **探测后确认已钉死、无需提问**：coupon SpecError/422 与统一 read_body 的组合（JSONDecodeError⊂ValueError 已被 route_post 捕获）；make_dispatch_handler 可调用形状（插件契约已固定 (handler, path) -> bool）；roi serve() 半死处理；NaN characterization 可执行性（现有 fixture 已驱动三引擎 demo 路径）。
+- **Q1（修订决策 1/3）进度打印**：删除 `on_progress` 回调设计。main.py 壳在 `run_engine` 之后按 results 插入序逐平台补打整行（`[{p}] 模式X … 历史 {min}~{max} 共{n}月 · 主口径[{main_view}]`），字节流与现状相等。依据：现状"实时进度"是幻觉（`end=" "` 无 flush，管道块缓冲）；`main_view` 来自 engine.run 返回，ingest 期物理上不可得。警告回放不受拆分影响（全链路唯一 warn 在 ingest_agg.to_unified，基线数据下为死代码）。备选 (c) 单平台原语推翻四件套 API，否决。
+- **Q2 build_views 返回键钉死**：返回且仅返回 `{"consolidated", "platform_annual", "check", "goods", "baselines"}`。calc 组装段变纯挑键；main.py 的 `baselines` 也从返回值取（避免第四次派生）。不返回 `*_all` 中间帧（无壳内消费者；write_report 内部自做 concat，已钉不动）。
+- **Q3 xlsx 对比掩码**：00_说明 sheet 的 `生成时间：…` 单元格（分钟精度）读入后正则归一化再 `assert_frame_equal`；其余 7 个 sheet（含 07_参数的 target_months 行）verbatim 对比。这是对比窗口归一化，非 deliberate-change。
+- **Q4 基线快照位置**：`workspace/baseline-stage2/`（gitignored、持久、贴数据；不进 `.flow/` 因其受版本控制且快照含业务数据衍生物）。流程：改前 `main.py run > workspace/baseline-stage2/console.before.txt 2> console.before.err` + 复制 `中间指标/` 与 xlsx；改后同法得 after；stdout/stderr 分开 diff、CSV `diff -r`、xlsx 带掩码对比。不钉 PYTHONHASHSEED（run 路径无 hash 依赖）。
+- **Q5 test_pipeline.py 合成方式**：手写最小 xlsx（不跑 demo.generate）——模式 A 必填仅 5 列（schema.py:7）、模式 B 必填 6 列（schema.py:11，加 UV 触发场视角）；engine 容忍 <12 月历史。一个模式 A 平台 + 一个带 UV 的模式 B 平台，断言：scan 排除 `~$`/缺目录返 `{}`；ingest 返回 `{mode, unified, structure}` 且 B 的 structure 为 None；run_engine 并入 engine.run 六键且保持插入序；build_views 五键、consolidated 行数=情景数×target_months。另加 AST 守卫（先例：test_httpkit_characterization.py）：main.py 不再定义 `_collect_inputs`、server.py 不再定义 `_scan`、两者都 import pipeline。
+- **Q6 空输入分叉冒烟自动化进 pytest**：main 侧 `monkeypatch.setattr(main, "ROOT", tmp_path)` + `pytest.raises(SystemExit)` 调 run_flow（首个 import main 的测试，已确认 main() 在 `__main__` 守卫内，import 安全）；server 侧 `WorkbenchState(tmp_path, cfg["caliber"]).load()` → demo_used is True 且 platforms 非空。AST 守卫顺带钉住"scan_inputs 不吸收 sys.exit/demo 自生成"。
+- **已钉死无需提问**：caliber 变异不对称（决策 2，证据链闭合）；四件套返回形状与两侧消费面逐键对上；calc 拷贝式 caliber 与 run_engine 交互（engine/ingest 对 caliber 只读）；load_cfg 收敛（server.load_cfg 原位保留，无 main.load_cfg 消费者）；warnings 过滤不进共用层；report.py 第三份 concat 不动；server 公开符号冻结。

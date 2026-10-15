@@ -1,36 +1,31 @@
-# 任务清单：重构阶段1 — HTTP 基础设施收敛（httpkit）
+# 任务清单：重构阶段2 — target_forecast pipeline 收敛
 
 > 来源：`.flow/prd.md`（含 GRILL 第 1 轮决议）。无 issue tracker，本文档即任务总线。
-> 切片顺序 = 提交顺序 = 风险升序。每片完成后跑四文件回归套件。
+> 硬要求：任务 1 的基线必须先于任何代码改动建立；行为逐字节等价（无 deliberate-change）。
 
-- [x] 1. Characterization 测试钉住现状行为 — 证据：`pytest tests/test_httpkit_characterization.py` 8 passed in 7.76s（对未重构现状全绿）
-- [x] 2. 新建 `tools_common/httpkit.py`（无调用方） — 证据：import 通过；回归 62 passed in 62.64s
-- [x] 3. roi_tool server 切换 — 证据：51 passed in 58.88s（characterization + workbench + assistant_http；含 roi 422 守卫测试）
-- [x] 4. coupon_tool server 切换 — 证据：15 passed in 8.30s（test_coupon_server + characterization 含子进程冒烟）
-- [x] 5. target_forecast server 切换 — 证据：12 passed in 12.25s（test_server + characterization，deliberate-change #2/#3 断言翻转后绿）
-- [x] 6. workbench 壳切换（仅 Responder/_json_bytes/_read_json_body） — 证据：51 passed in 58.02s（deliberate-change #1 翻转后绿）
+- [x] 1. 建立固定输入基线快照（改代码前） — 证据：workspace/baseline-stage2/ 含 console.before.txt/.err（stderr 0 行）、中间指标.before/、report.before.xlsx；07_参数 44 行含 target_months 行（pandas 实读确认）
+- [x] 2. 新建 `target_forecast/pipeline.py` 四件套 + test_pipeline.py — 证据：pytest test_pipeline.py 1 failed(AST守卫按预期红)+6 passed in 37.62s
+- [x] 3. main.py 薄壳化 — 证据：import main 通过；AST 守卫失败点仅剩 server._scan（main 侧已绿）；6 passed
+- [x] 4. server.py 薄壳化 — 证据：import target_forecast.plugin 通过；test_pipeline 7 passed in 38.99s（AST 守卫翻绿）
+- [x] 5. 基线 diff 对比 + 全量回归 — 证据：console stdout/stderr diff 逐字节相同；中间指标 diff -r 相同；xlsx 8 sheets 逐 sheet assert_frame_equal 全同（07_参数 44 行含 target_months）；全量 pytest 187 passed
 
 ---
 
-## 1. Characterization 测试钉住现状行为
+## 1. 建立固定输入基线快照（改代码前）
 
 ## What to build
 
-新建 `tests/test_httpkit_characterization.py`，在任何重构动手前对**现状代码**跑绿，把红队盲区钉成断言：
+当前 `workspace/forecast/` 已有固定输入（orders 京东/天猫/抖音.xlsx + metrics 私域.xlsx）。在任何代码改动前：
 
-1. 每 server 一个端点的 `Cache-Control: no-store` 响应头（coupon / roi 现状有；壳现状无——壳断言记录现状值，重构后按 deliberate-change #1 更新为"有"）
-2. 独立 handler 的 404 体形状现状（forecast=text/plain，coupon/roi=JSON）
-3. forecast 缺失静态文件的现状状态码（500）
-4. demo 全流程响应可被 `json.dumps(..., allow_nan=False)` 序列化不抛（coupon compare / roi calc / forecast calc）
-5. coupon 独立入口子进程冒烟：空闲端口 + `--port N --data-dir tmp`，cwd=tmp_path，轮询 `/api/state` ≤10s 后 terminate
-6. import 守卫：`coupon_tool.server`/`roi_tool.server`/`target_forecast.server` 不 import `workbench.*`
-7. roi 无独立测试文件——本文件自行在端口 0 启动 `roi_tool.server.make_handler(App(tmp_path))`
+1. `.venv/bin/python main.py run > workspace/baseline-stage2/console.before.txt 2> workspace/baseline-stage2/console.before.err`
+2. 复制 `workspace/forecast/output/中间指标/` 整目录与 `目标测算报告.xlsx` 到 `workspace/baseline-stage2/`
+3. 记录基线 xlsx 的 07_参数 sheet 含 target_months 行（红队实测第 43 行）
 
 ## Acceptance criteria
 
-- [ ] 对未重构的现状代码全绿（除标注"重构后更新"的壳 no-store 条目用 xfail/skip 记录）
-- [ ] 子进程冒烟测试 hermetic：不写仓库 workspace，不撞固定端口
-- [ ] `pytest tests/test_httpkit_characterization.py` 独立可跑
+- [ ] `workspace/baseline-stage2/` 含 console.before.txt/.err、中间指标快照、xlsx 快照
+- [ ] 快照目录不被 git 追踪（workspace/ 在 .gitignore）
+- [ ] 此任务完成前不改任何 .py
 
 ## Blocked by
 
@@ -38,41 +33,53 @@ None - can start immediately
 
 ---
 
-## 2. 新建 `tools_common/httpkit.py`（无调用方）
+## 2. 新建 `target_forecast/pipeline.py` 四件套 + test_pipeline.py
 
 ## What to build
 
-新建顶层包 `tools_common/`（`__init__.py` 仅一行 docstring，不 re-export），`httpkit.py` 含五组件：
+新建 `target_forecast/pipeline.py`（无调用方切换，本任务只加不改）：
 
-- `Responder(handler, static_dir: Path | None = None)`：send（带 `Cache-Control: no-store`）/ json（`ensure_ascii=False, allow_nan=False`）/ read_body / static（resolve + 前缀穿越检查 + is_file → 404 JSON；无条件 `; charset=utf-8`）
-- `json_bytes(obj)`
-- `make_dispatch_handler(handle_get, handle_post)`：安静模式 Handler，未命中回 JSON 404
-- `serve_quiet(handler_factory, port, banner)`：bind 127.0.0.1，`try serve_forever / except KeyboardInterrupt: pass / finally server_close()`
-- `AssistantParamsStore(path)`：load / save / `merge(section, patches) -> dict`（双 setdefault 形状）
+- `scan_inputs(root) -> (detail, agg)`：扫 `root/"workspace"/"forecast"/"orders"` 与 `.../metrics`，glob `*.xlsx` 排除 `~$`，目录缺返 `{}`。不含空输入策略。
+- `ingest_platforms(detail, agg, caliber) -> platforms`：模式 A/B ingest 循环（无 on_progress——GRILL Q1），返回 `{platform: {"mode", "unified", "structure"}}`（= server 缓存形状）。
+- `run_engine(platforms, scenarios, caliber) -> results`：逐平台 engine.run，返回 `{platform: {"mode", "unified", **engine.run(...)}}`（= main.py results 形状，保持插入序）。
+- `build_views(results) -> dict`：返回且仅返回 `{"consolidated", "platform_annual", "check", "goods", "baselines"}`（GRILL Q2）。
+- docstring 记录 caliber 变异不对称的原因（write_report 07_参数 依赖 main.py 壳的原地变异）。
+
+新建 `tests/test_pipeline.py`（GRILL Q5/Q6）：
+
+1. 手写最小 xlsx：一个模式 A 平台（~4 个月十来个订单）+ 一个带 UV 的模式 B 平台（钉 main_view 人/场分叉）
+2. scan_inputs 排除 `~$`、缺目录返 `{}`
+3. ingest_platforms 返回形状、模式 B `structure is None`
+4. run_engine 并入 engine.run 键且保持插入序
+5. build_views 五键、consolidated 行数 == 情景数 × target_months
+6. AST 守卫：main.py 不再定义 `_collect_inputs`、server.py 不再定义 `_scan`、两者都 import pipeline（本任务阶段对现状红，任务 3/4 完成后绿——按 TDD 红先行的预期失败处理）
+7. 空输入分叉：monkeypatch main.ROOT=tmp_path + SystemExit（main 侧）；WorkbenchState(tmp).load() → demo_used=True（server 侧）
 
 ## Acceptance criteria
 
-- [ ] 五组件齐备，docstring 说明取自哪个现状实现（最严者）
-- [ ] 任务 1 的测试仍全绿（本片不改任何行为）
-- [ ] `python -c "import tools_common.httpkit"` 通过
+- [ ] pipeline.py 四件套齐备，docstring 记录 caliber 不对称原因
+- [ ] test_pipeline.py 1-5、7 绿；6（AST 守卫）此时红属预期（任务 3/4 后翻绿）
+- [ ] 既有全量 pytest 不受影响
 
 ## Blocked by
 
-- 任务 1（characterization 先绿）
+- 任务 1
 
 ---
 
-## 3. roi_tool server 切换
+## 3. main.py 薄壳化
 
 ## What to build
 
-`roi_tool/server.py` 删除本地 `_Responder`/`_json_bytes`，改用 httpkit；`make_handler(app=None)` 薄包装保留签名；`serve()` 改为调 `serve_quiet`（保留，标记半死）；assistant_params 改用 `AssistantParamsStore`，**未知计划名 422 守卫保留在路由层**。
+- 删除 `_collect_inputs`、本地 `load_cfg`（改 import server.load_cfg）
+- `run_flow` = `scan_inputs(ROOT)` → 空输入 sys.exit（原位保留）→ `cfg["caliber"]["target_months"] = cfg["target"]["months"]` 原地变异（原位保留，07_参数 依赖）→ `ingest_platforms` → `run_engine` → 按 results 插入序逐平台补打整行进度（GRILL Q1：精确复刻 `[{p}] 模式X … 历史 … 共N月 · 主口径[X]`）→ `build_views` → 写 CSV/报表 → 控制台摘要（`baselines` 从 build_views 返回值取）
+- `warnings.catch_warnings` 包裹在 main() 原位不动
 
 ## Acceptance criteria
 
-- [ ] `test_roi_rejects_unknown_plan_name` 保持绿
-- [ ] `pytest tests/test_workbench.py tests/test_assistant_http.py` 绿（roi 无独立套件，靠壳内挂载测试回归）
-- [ ] 任务 1 的 roi 端点断言仍绿
+- [ ] main.py 无 `_collect_inputs`、无本地 `load_cfg`
+- [ ] 控制台输出与基线 console.before.txt 逐字节相等（任务 5 统一执行对比）
+- [ ] 全量 pytest 绿
 
 ## Blocked by
 
@@ -80,17 +87,19 @@ None - can start immediately
 
 ---
 
-## 4. coupon_tool server 切换
+## 4. server.py 薄壳化
 
 ## What to build
 
-`coupon_tool/server.py` 删除本地 `_Responder`/`_json_bytes`，改用 httpkit；`make_handler(app)` 薄包装保留；`serve()` 走 `serve_quiet`（banner 文案保留）；route_get/route_post 内部调用点替换，SpecError/422 语义不变（JSONDecodeError⊂ValueError 路径已确认）。
+- 删除 `_scan`；`WorkbenchState.load` 改调 `scan_inputs` + `ingest_platforms`（demo 自生成与 `demo_used` 逻辑原位保留；load 不跑引擎）
+- `calc()` 引擎循环改调 `run_engine`，汇总段改调 `build_views`（拷贝式 caliber 原位保留）
+- 公开符号签名全部不变：load_cfg / WorkbenchState / route_get / route_post / make_handler / serve / calc
 
 ## Acceptance criteria
 
-- [ ] `pytest tests/test_coupon_server.py` 绿
-- [ ] 任务 1 的 coupon 断言（含子进程冒烟，走新 serve_quiet 路径）仍绿
-- [ ] 响应行为除 deliberate-change 清单外零变化
+- [ ] server.py 无 `_scan`；AST 守卫（任务 2.6）翻绿
+- [ ] `python -c "import target_forecast.plugin"` 通过
+- [ ] 全量 pytest 绿（test_server / test_workbench 切片3 / characterization）
 
 ## Blocked by
 
@@ -98,36 +107,22 @@ None - can start immediately
 
 ---
 
-## 5. target_forecast server 切换
+## 5. 基线 diff 对比 + 全量回归
 
 ## What to build
 
-`target_forecast/server.py`：删除本地 `_Responder`；`/`、`/style.css`、`/app.js` 迁移到 `r.static(...)`（缺失文件 500→404，deliberate-change #3）；`/api/calc` 读体改走 `read_body()`（deliberate-change #4）；404 体 text/plain→JSON（deliberate-change #2）；xlsx/csv 导出分支保留 raw `r.send` 与平台名穿越防护；删除模块级 `load_assistant_params`/`save_assistant_params`，改用 `AssistantParamsStore`；`serve()` 薄包装保留 `state.load()` 预加载后调 `serve_quiet`，退出语删除（deliberate-change）。
+1. 重构后 `main.py run > workspace/baseline-stage2/console.after.txt 2> console.after.err`
+2. `diff` console before/after（stdout/stderr 分开）——必须逐字节相等
+3. `diff -r` 中间指标 before/after——必须相等
+4. pandas 逐 sheet 对比 xlsx：00_说明 掩码 `生成时间：…` 行（GRILL Q3），其余 7 sheet verbatim `assert_frame_equal`（重点：07_参数 的 target_months 行存在）
+5. 全量 `pytest`
 
 ## Acceptance criteria
 
-- [ ] `pytest tests/test_server.py` 绿
-- [ ] 任务 1 的 forecast 断言按 deliberate-change 清单更新后绿
-- [ ] 手动 `main.py demo` 跑通（在 VERIFY 记录）
+- [ ] console/CSV/xlsx 三项对比零差异（除掩码行）
+- [ ] 全量 pytest 绿
+- [ ] 对比脚本与结果记录到 VERIFY 证据
 
 ## Blocked by
 
 - 任务 4
-
----
-
-## 6. workbench 壳切换（仅 Responder/_json_bytes/_read_json_body）
-
-## What to build
-
-`workbench/server.py`：10 处 `_send` 调用点 + 3 处 `_json_bytes` + `_read_json_body` 改用 httpkit Responder/json_bytes；字节字面量错误体改 `Responder.json(...)`（输出逐字节相同）；壳所有响应获得 `Cache-Control: no-store`（deliberate-change #1）。**不改** `make_handler` 的注册表分发结构、`serve` 的 sidecar 生命周期、静态资源 ctype 映射。
-
-## Acceptance criteria
-
-- [ ] `pytest tests/test_workbench.py tests/test_assistant_http.py` 绿（含 `test_confirm_write_real_loopback` 落盘格式断言）
-- [ ] 壳 diff 不含 assistant/sidecar 路径改动
-- [ ] 任务 1 的壳 no-store 断言翻转为"有"后绿
-
-## Blocked by
-
-- 任务 5

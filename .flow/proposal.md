@@ -1,55 +1,55 @@
-# 提案（讨论稿）：target-forecast 仓库重构 — 阶段1
+# 提案（讨论稿）：target-forecast 仓库重构 — 阶段2
 
-> 来源：2026-10-15 会话中基于 codebase-memory 图谱分析输出的重构方案。本 flow 只执行**阶段1**。
+> 来源：2026-10-15 会话中基于 codebase-memory 图谱分析输出的重构方案。本 flow 只执行**阶段2**。
+> 阶段1（httpkit 收敛）已完成并推送（5ed0651），产物归档于 `.flow/archive/2026-10-15-stage1-httpkit/`。
 
 ## 一句话目标
 
-阶段1：收敛 HTTP 基础设施四份拷贝——新建共享 httpkit 模块，4 个 server 切换使用，净删约 250 行重复代码。
+阶段2：P0 target_forecast pipeline 收敛——消除 `main.py` 与 `target_forecast/server.py` 之间的业务逻辑双份（汇总/scan/load_cfg），两处调用方变成薄壳。
 
-## 背景与证据（图谱 + 逐行比对确认）
+## 背景与证据（逐行比对确认）
 
-以下代码在 4 个 server 中逐字复制：
+`main.py`（CLI 入口）与 `target_forecast/server.py`（工作台 calc）维护着同一段业务逻辑的两份拷贝，改汇总口径要改两次，是真实的 bug 温床：
 
-| 重复代码 | 出现位置 |
-|---|---|
-| `_Responder`（send/json/read_body/static） | `coupon_tool/server.py:60`、`target_forecast/server.py:168`、`roi_tool/server.py:28`，3 份几乎逐字相同 |
-| `_json_bytes` | coupon / roi / workbench 各一份 |
-| `make_handler` + `serve`（安静模式、KeyboardInterrupt 模板） | 4 个 server 各一份 |
-| `assistant_params` 读写 | `target_forecast/server.py:197-207` 与 `roi_tool/server.py:85-94` 逻辑相同 |
-| 静态文件服务 + MIME 猜测 | 4 处，且实现已轻微漂移（workbench 有路径穿越防护，工具端没有；forecast 的 `json()` 多了 `allow_nan=False`） |
+| 重复逻辑 | main.py | target_forecast/server.py |
+|---|---|---|
+| `load_cfg`（读 config.yaml） | `main.py:27-29` | `server.py:32-34`（`load_cfg(root)`） |
+| 输入扫描（glob *.xlsx 排除 ~$） | `main.py:32-35` `_collect_inputs` | `server.py:37-40` `_scan`（被 `WorkbenchState.load` 用） |
+| 模式A/B ingest+engine 循环 | `main.py:47-61`（run_flow 内联） | `server.py:65-77`（`WorkbenchState.load` 内联） |
+| 三视角 concat + consolidate + platform_annual | `main.py:64-77` | `server.py:132-147`（`calc()` 内联） |
 
-## 阶段1 方案（原话收敛）
+两者有一处**结构性差异**：main.py 的 results 含 `unified`（写中间指标 CSV 用），server 的 platforms dict 存 `unified`/`structure` 原始数据、`calc()` 时才算引擎——即 main.py 是"ingest+算+写盘"一次性流程，server 是"ingest 缓存 + 按需 calc"两段式。收敛方案必须容纳这两种用法。
 
-- 新建 `workbench/httpkit.py`（或 `tools_common/httpkit.py`，若要避免工具反向依赖 workbench），收敛为：
-  - `Responder(handler)` 类：send / json / read_body / static（带穿越防护，统一 `allow_nan` 策略）
-  - `make_dispatch_handler(routes_get, routes_post)` 工厂
-  - `serve_quiet(app, port, banner)` 公共启动模板
-  - `AssistantParamsStore(path)`：load/save/merge 一处实现
-- 四个 server 改为 import 使用。
-- 漂移点（穿越防护、`allow_nan`）取最严的实现为准。
-- 预计净删 ~250 行。
-- 验证：`pytest tests/test_server.py tests/test_coupon_server.py tests/test_workbench.py tests/test_assistant_http.py`。
+## 阶段2 方案（原话收敛）
+
+- 在 `target_forecast/aggregate.py`（或新 `pipeline.py`）提取：
+  - `scan_inputs(root) -> (detail, agg)`
+  - `run_platforms(detail, agg, cfg) -> results`（模式 A/B 的 ingest+engine 循环，main.py 和 `WorkbenchState.load` 共用）
+  - `build_views(results) -> dict`（concat + consolidate + platform_annual + check/goods sheet）
+- `main.py run_flow` 和 `server.calc` 都变成薄壳。注意保留 main.py 的进度打印（可传回调）。
+- 验证：`pytest tests/test_core.py` + 手动 `main.py demo` 对比输出。
 
 ## 硬约束（不可推翻）
 
-1. **不引入 Web 框架**。`prd.md`（上一轮，已归档）与各模块 docstring 明确"无框架、离线可用、只用标准库"是既定设计决策（红队结论）。
-2. **不动三个引擎的数学**（`coupon_tool/engine`、`target_forecast/engine`、`roi_tool/engine`）。
-3. 每阶段独立成 PR/提交，全程 `pytest` 保持绿。
+1. 不引入 Web 框架或非标准库依赖（沿用上一轮红队结论与 README）。
+2. 不动三个引擎的数学公式（`.flow/archive/2026-09-27-assistant-p3/` 的 proposal 为规格来源）。
+3. 全程 `pytest` 保持绿；行为（控制台输出、API 响应、落盘文件）除明确记录外零变化。
 4. 保留用户已有改动（本次开工时工作区干净，baseline_dirty=[]）。
+5. 阶段1 的 httpkit 成果（tools_common）不回退。
 
 ## 后续阶段（不在本 flow 范围，仅记录）
 
-- 阶段2：P0 target_forecast pipeline 收敛（main.py 与 server.py 的汇总/scan/load_cfg 双份）
 - 阶段3：P1 coupon server 路由表化（route_post 圈复杂度 29/认知 105）
-- 阶段4：P2 engine.simulate 拆分（33/54）
+- 阶段4：P2 coupon engine.simulate 拆分（33/54）
 - 阶段5：P2 其余 + P3 测试 helper 去重
 
 ## 已拒绝的替代
 
-- 引入 Flask/FastAPI：违反约束 1。
-- 为"未来工具"提前抽象插件协议：现有 Registry + manifest dict 够用。
+- 把 server 改成调 main.py 的子进程：引入进程边界，违背本地一体化设计。
+- 顺手重构 engine/aggregate 内部：超出阶段2范围。
 
 ## 开放问题
 
-- httpkit 放 `workbench/` 还是新顶层包 `tools_common/`？（工具反向依赖 workbench 的接受度）
-- forecast server 的 `_Responder` 无 `static()` 方法（它内联在 route_get 里）——收敛时以 coupon/roi 版本为准，需确认 forecast 的特殊分支（index.html 直读、xlsx/csv 下载）如何融入统一 Responder。
+- 提取目标是放进现有 `aggregate.py` 还是新建 `pipeline.py`？（ingest 循环不算"aggregate"语义）
+- server 两段式（缓存 ingest、按需 calc）与 main.py 一段式（ingest+算+写盘）的统一程度：`run_platforms` 返回到哪一层（unified/structure 还是算完的 results）？
+- main.py 进度打印与警告捕获（`warnings.catch_warnings`）如何穿过共用层。

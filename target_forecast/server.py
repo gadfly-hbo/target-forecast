@@ -21,7 +21,7 @@ import yaml
 from tools_common.httpkit import (AssistantParamsStore, Responder,
                                   make_dispatch_handler, serve_quiet)
 
-from . import aggregate, demo, engine, ingest_agg, ingest_detail, report
+from . import demo, pipeline
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -32,12 +32,6 @@ _GROWTH_RANGE = (-0.5, 2.0)
 def load_cfg(root: Path) -> dict:
     with open(root / "config.yaml", encoding="utf-8") as f:
         return yaml.safe_load(f)
-
-
-def _scan(d: Path) -> dict:
-    if not d.exists():
-        return {}
-    return {p.stem: p for p in sorted(d.glob("*.xlsx")) if not p.name.startswith("~$")}
 
 
 class WorkbenchState:
@@ -56,27 +50,15 @@ class WorkbenchState:
         with self.lock:
             if self.platforms and not force:
                 return
-            detail, agg = _scan(self.root / "workspace" / "forecast" / "orders"), _scan(self.root / "workspace" / "forecast" / "metrics")
+            detail, agg = pipeline.scan_inputs(self.root)
             if not detail and not agg:
                 print("workspace/forecast 为空，自动生成演示数据 …")
                 demo.generate(self.root)
-                detail, agg = _scan(self.root / "workspace" / "forecast" / "orders"), _scan(self.root / "workspace" / "forecast" / "metrics")
+                detail, agg = pipeline.scan_inputs(self.root)
                 self.demo_used = True
             else:
                 self.demo_used = False
-            platforms = {}
-            for platform, path in detail.items():
-                lines = ingest_detail.load_detail(path, platform)
-                od = ingest_detail.classify_new(ingest_detail.order_level(lines),
-                                                self.caliber["new_customer_window_days"])
-                unified = ingest_detail.to_unified(od, platform)
-                structure = ingest_detail.goods_structure(lines, self.caliber, lines["日期"].max())
-                platforms[platform] = {"mode": "A", "unified": unified, "structure": structure}
-            for platform, path in agg.items():
-                df = ingest_agg.load_agg(path, platform)
-                platforms[platform] = {"mode": "B", "unified": ingest_agg.to_unified(df, platform),
-                                       "structure": None}
-            self.platforms = platforms
+            self.platforms = pipeline.ingest_platforms(detail, agg, self.caliber)
 
     def state_payload(self, cfg: dict, force: bool = False) -> dict:
         self.load(force)
@@ -127,26 +109,8 @@ def _clip(x) -> float:
 def calc(state: WorkbenchState, cfg: dict, scenarios: dict) -> dict:
     state.load()
     caliber = {**cfg["caliber"], "target_months": cfg["target"]["months"]}
-    results = {}
-    for platform, v in state.platforms.items():
-        results[platform] = {"mode": v["mode"], **engine.run(v["unified"], v["structure"], scenarios, caliber)}
-
-    main_parts, person_parts, field_parts = [], [], []
-    for platform, r in results.items():
-        main_df = r["field"] if r["main_view"] == "场" else r["person"]
-        main_parts.append(main_df.assign(platform=platform))
-        person_parts.append(r["person"].assign(platform=platform))
-        if r["field"] is not None:
-            field_parts.append(r["field"].assign(platform=platform))
-    main_all = pd.concat(main_parts, ignore_index=True)
-    person_all = pd.concat(person_parts, ignore_index=True)
-    field_all = pd.concat(field_parts, ignore_index=True) if field_parts else None
-    baselines = {p: r["baseline"] for p, r in results.items()}
-
-    consolidated = aggregate.consolidate(person_all, main_all, field_all)
-    plat_annual = aggregate.platform_annual(main_all, baselines)
-    check = report._build_check_sheet(results)
-    goods = report._build_goods_sheet(results)
+    results = pipeline.run_engine(state.platforms, scenarios, caliber)
+    views = pipeline.build_views(results)
 
     return {
         "platforms": {
@@ -159,10 +123,10 @@ def calc(state: WorkbenchState, cfg: dict, scenarios: dict) -> dict:
             }
             for p, r in results.items()
         },
-        "consolidated": _sanitize(consolidated),
-        "platform_annual": _sanitize(plat_annual),
-        "check": _sanitize(check),
-        "goods": _sanitize(goods),
+        "consolidated": _sanitize(views["consolidated"]),
+        "platform_annual": _sanitize(views["platform_annual"]),
+        "check": _sanitize(views["check"]),
+        "goods": _sanitize(views["goods"]),
         "target_range": results[next(iter(results))]["target_months"] if results else [],
     }
 

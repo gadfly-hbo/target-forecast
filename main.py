@@ -15,66 +15,31 @@ import sys
 import warnings
 from pathlib import Path
 
-import pandas as pd
-import yaml
-
-from target_forecast import aggregate, demo, engine, ingest_agg, ingest_detail, report, server, templates
+from target_forecast import demo, pipeline, report, server, templates
 
 ROOT = Path(__file__).resolve().parent
 OUT_DIR = ROOT / "workspace" / "forecast" / "output"
 
 
-def load_cfg() -> dict:
-    with open(ROOT / "config.yaml", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def _collect_inputs() -> tuple[dict, dict]:
-    def scan(d: Path):
-        return {p.stem: p for p in sorted(d.glob("*.xlsx")) if not p.name.startswith("~$")} if d.exists() else {}
-    return scan(ROOT / "workspace" / "forecast" / "orders"), scan(ROOT / "workspace" / "forecast" / "metrics")
-
-
 def run_flow(cfg: dict, demo_flag: bool) -> None:
-    detail_files, agg_files = _collect_inputs()
+    detail_files, agg_files = pipeline.scan_inputs(ROOT)
     if not detail_files and not agg_files:
         sys.exit("workspace/forecast/orders 与 workspace/forecast/metrics 下没有任何 xlsx 输入文件。先运行 `main.py demo` 或按 templates/ 模板填数。")
 
-    caliber = cfg["caliber"]
-    caliber["target_months"] = cfg["target"]["months"]
-    results = {}
-
-    for platform, path in detail_files.items():
-        print(f"[{platform}] 模式A 明细测算 …", end=" ")
-        lines = ingest_detail.load_detail(path, platform)
-        od = ingest_detail.classify_new(ingest_detail.order_level(lines), caliber["new_customer_window_days"])
-        unified = ingest_detail.to_unified(od, platform)
-        structure = ingest_detail.goods_structure(lines, caliber, lines["日期"].max())
-        results[platform] = {"mode": "A", "unified": unified, **engine.run(unified, structure, cfg["scenarios"], caliber)}
-        print(f"历史 {unified['month'].min()}~{unified['month'].max()} 共{len(unified)}月 · 主口径[{results[platform]['main_view']}]")
-
-    for platform, path in agg_files.items():
-        print(f"[{platform}] 模式B 聚合测算 …", end=" ")
-        df = ingest_agg.load_agg(path, platform)
-        unified = ingest_agg.to_unified(df, platform)
-        results[platform] = {"mode": "B", "unified": unified, **engine.run(unified, None, cfg["scenarios"], caliber)}
-        print(f"历史 {unified['month'].min()}~{unified['month'].max()} 共{len(unified)}月 · 主口径[{results[platform]['main_view']}]")
+    # 原地变异刻意保留：write_report 的 07_参数 sheet 遍历 cfg["caliber"] 取此行
+    cfg["caliber"]["target_months"] = cfg["target"]["months"]
+    platforms = pipeline.ingest_platforms(detail_files, agg_files, cfg["caliber"])
+    results = pipeline.run_engine(platforms, cfg["scenarios"], cfg["caliber"])
+    for platform, r in results.items():
+        u = r["unified"]
+        kind = "明细" if r["mode"] == "A" else "聚合"
+        print(f"[{platform}] 模式{r['mode']} {kind}测算 … 历史 {u['month'].min()}~{u['month'].max()} "
+              f"共{len(u)}月 · 主口径[{r['main_view']}]")
 
     # 汇总与报表
-    main_parts, person_parts, field_parts = [], [], []
-    for platform, r in results.items():
-        main_df = r["field"] if r["main_view"] == "场" else r["person"]
-        main_parts.append(main_df.assign(platform=platform))
-        person_parts.append(r["person"].assign(platform=platform))
-        if r["field"] is not None:
-            field_parts.append(r["field"].assign(platform=platform))
-    main_all = pd.concat(main_parts, ignore_index=True)
-    person_all = pd.concat(person_parts, ignore_index=True)
-    field_all = pd.concat(field_parts, ignore_index=True) if field_parts else None
-    baselines = {p: r["baseline"] for p, r in results.items()}
-
-    consolidated = aggregate.consolidate(person_all, main_all, field_all)
-    plat_annual = aggregate.platform_annual(main_all, baselines)
+    views = pipeline.build_views(results)
+    consolidated, plat_annual = views["consolidated"], views["platform_annual"]
+    baselines = views["baselines"]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / "中间指标").mkdir(exist_ok=True)
@@ -106,7 +71,7 @@ def main() -> None:
                     help="demo=演示数据跑通 | run=正式测算 | serve=本地工作台 | templates=生成输入模板")
     ap.add_argument("--port", type=int, default=8300, help="serve 模式端口（默认 8300）")
     args = ap.parse_args()
-    cfg = load_cfg()
+    cfg = server.load_cfg(ROOT)
     if args.command == "templates":
         templates.build(ROOT)
     elif args.command == "serve":

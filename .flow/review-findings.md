@@ -1,29 +1,44 @@
-# REVIEW 发现（fresh-context 独立审查，2026-10-15）
+# REVIEW 发现（阶段2，2026-10-15）
 
-## Verdict: **PASS**（无 blocking 发现；6 条 non-blocking 观察）
+> **降级模式声明**：本阶段 REVIEW 因子代理配额限制（403，两次尝试均失败）按 dev-flow 规定降级为**主代理内联执行** matt-code-review 两轴审查，非 fresh-context。独立复跑的客观证据（pytest / 基线 diff）均真实执行，但主观审查的对抗距离弱于标准模式，DONE 摘要中将披露。
 
-## VERIFY 证据复核——最高优先项，无不一致
+## Verdict: **PASS**（无 blocking 发现；3 条 non-blocking）
 
-复跑记录的命令：`.venv/bin/python -m pytest -q` → **exit 0, 180 passed in 66.22s**。记录证据为 "exit 0, 180 passed in 64.82s"，数量与退出码精确复现，1.4s 差为噪声。
+## VERIFY 证据复核——无不一致
 
-## Spec 轴（对照 .flow/prd.md + GRILL 决议 + deliberate-change 清单）
+- 复跑 `.venv/bin/python -m pytest -q` → **exit 0, 187 passed in 99.44s**（记录：187 passed in 107.57s；数量与退出码精确一致）
+- 复比 `console.before.txt` vs `console.after.txt` → identical；`diff -r 中间指标.before/after` → identical
+- xlsx 逐 sheet（00_说明带生成时间掩码）8/8 IDENTICAL，07_参数 44 行含 target_months 行
 
-六条 deliberate-change 全部在代码中核实（no-store 头、forecast 404 JSON、缺失静态 404、/api/calc 走 read_body、allow_nan=False、roi serve 半死标注）；GRILL 补充决议全部核实（退出路径统一 finally server_close、roi 422 守卫在 merge 之前、assistant_params 落盘格式逐字节一致、tools_common 不 import 业务包、公开签名全部保留、壳注册表分发与 sidecar 生命周期未动、diff 未触碰引擎/插件/静态文件）。无范围蔓延。
+## Spec 轴
 
-## Non-blocking 发现及处置（CONVERGE 记录）
+逐项核对 `.flow/prd.md`（含 GRILL 决议）：
+
+- ✅ 四件套签名与返回形状（scan_inputs 无空输入策略 / ingest_platforms 只 ingest / run_engine 保持插入序带 unified / build_views 恰好五键）——`target_forecast/pipeline.py`
+- ✅ Q1：on_progress 已删，main.py 壳在 run_engine 后按插入序补打整行；console 基线字节级相同（独立复比证实）
+- ✅ caliber 不对称按 PRD 决策 2 保留：main.py:29-30 原地变异（带注释），server.calc 拷贝式；07_参数 sheet 44 行含 target_months（pandas 实读）
+- ✅ 空输入分叉留在两壳：main.py:26-27 sys.exit 原位；server.load:53-58 demo 自生成原位；scan_inputs 未吸收任一策略
+- ✅ server 公开符号冻结：load_cfg/WorkbenchState/state_payload/calc/route_*/make_handler/serve 签名不变；`import target_forecast.plugin` 通过
+- ✅ WorkbenchState.load 仍不做引擎工作（只 scan+ingest；引擎在 calc 懒算）
+- ✅ warnings 捕获留在 main() 原位；共用层无 warnings 过滤
+- ✅ 测试证据链：test_pipeline.py 7 条全绿（手写最小 xlsx、AST 守卫、空输入分叉自动化）
+- ✅ 无范围蔓延：diff 仅 main.py / server.py / pipeline.py（新）/ test_pipeline.py（新）+ .flow 过程文件
+
+## Standards 轴（smell 基线）
+
+- 无新增 Duplicated Code（本阶段目标即消除两份拷贝，已达成；diff -368/+219 净删 149 行）
+- 命名清晰、无 Middle Man、无 Speculative Generality
+
+## Non-blocking 发现
 
 | # | 发现 | 分类 | 处置 |
 |---|---|---|---|
-| S1 | GRILL Q5 记录计划未完全执行：字节字面量错误体应改 `Responder.json(...)`，实际仍为字节字面量（输出逐字节相同，属记录与代码不符） | non-blocking | **已修复**：5 处字节字面量改为 `Responder.json(...)`，复跑 51 passed in 60.04s |
-| S2 | Q5"零行为变化"在边缘不精确：壳旧 `_read_json_body` 有 `or b"{}"` 兜底且自动探测编码；统一 `read_body` 对 Content-Length>0 的空读抛 JSONDecodeError 且强制 UTF-8。仅客户端发长度后断连可达，loopback 实际不可达 | non-blocking | **接受偏差**：strict 行为与 coupon/roi 原版一致（多数派行为），记录在案不改代码 |
-| S3 | deliberate-change #5 的失败模式无负向测试（只有正向序列化断言） | non-blocking | 记录为已知覆盖缺口，留待后续（PRD Testing Decisions 未显式要求） |
-| S4 | GRILL Q7 的一 PR 六提交未实现：工作集中在一个未提交 blob，中间态无法诚实重建 | non-blocking | **记录偏差**：单次提交，提交信息中列明六个切片与 deliberate-change 清单 |
-| S5 | 三工具的 handle_get/handle_post 包装是纯委托（Middle Man 气味，可用 functools.partial） | non-blocking | 不处理——保留包装利于 traceback，判断题 |
-| S6 | 机械编辑残留：`send( 404` 多余空格 ×10、每调用新建 Responder | non-blocking | **已随 S1 一并修复** |
+| S1 | report.py:77-86 的第三份 concat 拷贝仍在（write_report 内部自做）——PRD 决策 5 已显式划出范围外 | non-blocking（已记录的范围界定） | 不处理，留待后续阶段 |
+| S2 | 进度打印的墙钟交织变化：原"逐平台边算边打"，新"算完后统一打"——字节流相同（GRILL Q1 已决），仅实时性差异在多平台慢数据下可感知 | non-blocking（PRD 已记录） | 不处理 |
+| S3 | `target_forecast/server.py:17` `import numpy as np` 为**存量**无用导入（本 diff 未触碰、阶段1 时已存在） | non-blocking（存量问题，不混入本次 diff） | 留待阶段3+ 顺手或单独清理 |
 
-## 复核准则（recheck criteria）
+## 复核准则
 
-- S1/S6：workbench/server.py 中无字节字面量错误体、无 `send( ` 空格残留——已满足
-- S2：确认无测试或真实客户端能在 /api/assistant/chat 上发出带长度空体——loopback 下不可达，接受
-- S3：补一条构造 NaN 引擎输出断言 coupon /api/compare 回 422 的测试（后续批次）
-- S4：git log 显示单次提交且 tasks.md 记录偏差——SHIP 时满足
+- S1：`grep -n "main_parts" target_forecast/report.py` 仍命中——满足（范围外确认）
+- S2：console 基线 diff identical——满足
+- S3：`git diff target_forecast/server.py` 不含 numpy 行——满足
