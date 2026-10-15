@@ -12,12 +12,12 @@
 - 验证：pytest 234 passed；node --test 6/6；**真实 MIMO 有界冒烟全链路**（读问多工具循环+摘要回流；写提案→stage→pending 重建→确认→执行→落盘；audit 48 事件；确认门语义零弱化）
 - 前端 app.js 零改动；Echo 回放链零改动
 
-## 遗留（non-blocking，已记录）
+## 遗留状态（b8f28f4 已修前三项）
 
-- N1：多写 run 的 _relay_orchestrated 只透传 staged[0]（单 pending 设计 + PRD 单写范围；多写支持留后续）
-- 摘要有损为既有缺口（后续增强：exec_read 响应加 result 原文字段）
-- audit.jsonl 为进程内内存 BudgetStore + 文件审计；标准建议的持久预算账本留后续（单用户本地场景下内存版已满足台账意图）
-- (c)-resume checkpoint 重放（写确认后免模型调用）为可选增强
+- ~~N1 多写只透传首个~~ **已修**：透传首个 + 其余取消 + 如实告知（pytest 钉住）
+- ~~摘要有损~~ **已修**：exec_read 返回 {summary, result}，真实冒烟验证模型可列出计划名明细
+- ~~持久预算账本~~ **已修**：budget-store.ts（内存版语义对齐 + JSON 原子写跨重启累计，node 测试验证）
+- **(c)-resume 暂缓**（决策记录）：需 createSessionRuntime 0.4.0 重契约（storage/acquireWriter/reconcile）+ 写效果移入 run 内（TS 移植 Python 写舞步）+ 确认即恢复协议——属另一场架构迁移而非增强；当前确认路径的单次模型调用是描述效果结果的语义需要。要做的开 /dev-flow
 
 ## 运维注意
 
