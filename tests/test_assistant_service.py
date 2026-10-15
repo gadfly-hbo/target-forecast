@@ -195,3 +195,69 @@ def test_roi_set_plan_net_none_guard():
     call_id = res["pending_confirmation"]["call_id"]
     res2 = svc.chat({"confirm": call_id, "tool_id": "roi"})
     assert "未找到该计划" in res2["reply"]
+
+
+# ---------- 阶段5 门禁A3：_execute 四条零覆盖分支的执行测试 ----------
+
+COUPON_STATE = {"scenarios": ["coupon-demo-001"], "runs": ["run-1", "run-2"]}
+FORECAST_CALC_FULL = {"consolidated": [{"scenario": "挑战", "GMV_主口径": 123456.0}]}
+
+
+class FakeHttp3(FakeHttp):
+    """补充 get_state×3 / forecast__calc / coupon__list_runs / coupon__compare 需要的路径。"""
+
+    def __call__(self, method, path, body=None):
+        self.calls.append((method, path, body))
+        if path == "/t/coupon/api/state":
+            return COUPON_STATE
+        if path == "/t/coupon/api/runs":
+            return COUPON_STATE["runs"] if method == "GET" else {"runs": COUPON_STATE["runs"]}
+        if path == "/t/coupon/api/scenario/coupon-demo-001":
+            return {"scenario_id": "coupon-demo-001"}
+        if path == "/t/coupon/api/compare":
+            return {"rows": [{"label": "无券"}, {"label": "满159减10"}]}
+        return super().__call__(method, path, body)
+
+
+def _svc3():
+    http = FakeHttp3()
+    svc = AssistantService(build_default_registry(ROOT), EchoBackend(FIXTURES), http)
+    return svc, http
+
+
+def test_get_state_branch_all_tools():
+    svc, http = _svc3()
+    assert svc._execute({"name": "forecast__get_state", "args": {}}) == "目标测算：2 平台（明细1/聚合1），正式数据"
+    assert svc._execute({"name": "coupon__get_state", "args": {}}) == "优惠券：1 个场景，2 个封存运行"
+    assert svc._execute({"name": "roi__get_state", "args": {}}) == "投放 ROI：4 个演示计划（合成假设）"
+    assert [p for m, p, _ in http.calls] == ["/t/forecast/api/state", "/t/coupon/api/state",
+                                             "/t/roi/api/state"]
+
+
+def test_forecast_calc_branch():
+    svc, http = _svc3()
+    reply = svc._execute({"name": "forecast__calc", "args": {}})
+    assert reply == "全渠道年化GMV（按情景）：挑战 123456 元"
+    posts = [b for m, p, b in http.calls if m == "POST" and p == "/t/forecast/api/calc"]
+    assert posts == [{"scenarios": {}}]
+
+
+def test_coupon_list_runs_branch_dual_shape():
+    svc, http = _svc3()
+    assert svc._execute({"name": "coupon__list_runs", "args": {}}) == "已封存运行 2 个：run-1, run-2"
+    # dict 形态容错
+    http2 = FakeHttp3()
+    http2.__class__ = type("H", (FakeHttp3,), {
+        "__call__": lambda self, m, p, b=None: {"runs": COUPON_STATE["runs"]} if p == "/t/coupon/api/runs" else FakeHttp3.__call__(self, m, p, b)})
+    svc2 = AssistantService(build_default_registry(ROOT), EchoBackend(FIXTURES), http2)
+    assert svc2._execute({"name": "coupon__list_runs", "args": {}}).startswith("已封存运行 2 个")
+
+
+def test_coupon_compare_branch():
+    svc, http = _svc3()
+    reply = svc._execute({"name": "coupon__compare", "args": {"scenario_id": "coupon-demo-001"}})
+    assert reply == "场景 coupon-demo-001 比较完成：2 个候选（含无券基准）"
+    gets = [p for m, p, _ in http.calls if m == "GET"]
+    assert "/t/coupon/api/scenario/coupon-demo-001" in gets
+    posts = [b for m, p, b in http.calls if m == "POST" and p == "/t/coupon/api/compare"]
+    assert posts == [{"scenario": {"scenario_id": "coupon-demo-001"}}]
