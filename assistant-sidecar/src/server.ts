@@ -19,7 +19,8 @@ import {createServer, type IncomingMessage, type ServerResponse} from "node:http
 import {appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync} from "node:fs";
 import {join} from "node:path";
 import {pathToFileURL} from "node:url";
-import {createRuntime, createPiTransport, createMemoryBudgetStore} from "pi-agent-runtime";
+import {createRuntime, createPiTransport} from "pi-agent-runtime";
+import {createFileBudgetStore} from "./budget-store.js";
 import type {AuditSink, JsonValue, ModelConfig, ModelTransport, RunResult, Tool} from "pi-agent-runtime";
 
 const PORT = Number(process.env.WORKBENCH_SIDECAR_PORT ?? 8321);
@@ -99,7 +100,9 @@ export function toSdkTools(tools: OpenAiTool[], writeNames: readonly string[],
         }
         const out = await postJson(`${shellUrl}/api/assistant/exec_read`, {name, args});
         collect.push({name, args, summary: String(out.summary ?? "")});
-        return {summary: String(out.summary ?? "")} as {[key: string]: JsonValue};
+        // result 补摘要信息损失（如计划名清单）；summary 仍供前端展示
+        return (out.result === undefined ? {summary: String(out.summary ?? "")}
+                : {summary: String(out.summary ?? ""), result: out.result}) as {[key: string]: JsonValue};
       },
     };
   });
@@ -128,15 +131,16 @@ export interface AssistantDeps {
   transport?: ModelTransport;
   shellUrl?: string;
   auditFile?: string;
-  budgets?: ReturnType<typeof createMemoryBudgetStore>;
+  budgets?: ReturnType<typeof createFileBudgetStore>;
   authorize?: (action: unknown) => Promise<boolean>;
 }
 
 export function createAssistant(deps: AssistantDeps = {}) {
   const shellUrl = deps.shellUrl ?? process.env.WORKBENCH_SHELL_URL ?? "http://127.0.0.1:8300";
-  const auditFile = deps.auditFile ?? join(process.env.WORKBENCH_ROOT ?? process.cwd(),
-                                           "workspace", "assistant", "audit.jsonl");
-  const budgets = deps.budgets ?? createMemoryBudgetStore();
+  const root = process.env.WORKBENCH_ROOT ?? process.cwd();
+  const auditFile = deps.auditFile ?? join(root, "workspace", "assistant", "audit.jsonl");
+  // 持久预算账本（标准终态）：跨重启累计计量；测试可注入内存版
+  const budgets = deps.budgets ?? createFileBudgetStore(join(root, "workspace", "assistant", "budget.json"));
   const audit = makeAuditSink(auditFile);
 
   function runtime() {

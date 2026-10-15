@@ -142,3 +142,24 @@ test("拍平：system 首段 + 角色行 + 工具行", () => {
   ]);
   assert.equal(text, "系统指令\n\n用户：第一问\n\n助手：第一答\n\n工具 roi__get_state 返回：摘要：ok\n\n用户：第二问");
 });
+
+test("持久预算账本：跨实例累计计量与配置身份", async () => {
+  const {createFileBudgetStore} = await import("../dist/budget-store.js");
+  const file = join(mkdtempSync(join(tmpdir(), "bs-")), "budget.json");
+  const limits = {cumulative: "unlimited", maxOutputTokens: 512, modelTimeoutMs: 5000,
+                  toolTimeoutMs: 5000, controlTimeoutMs: 5000} as const;
+  const A = createFileBudgetStore(file);
+  const lease = await A.claimUncapped("t1", "run-1", "cfg-1", limits);
+  const reserved = await lease.reserveModelUpTo(512);  // uncapped 策略须显式上限（与内存版语义一致）
+  await lease.settleModelUsage(reserved, {inputTokens: 7, outputTokens: 3});
+  await lease.release(100);
+  // 跨实例（= 跨重启）：计量持久
+  const B = createFileBudgetStore(file);
+  const snap = (await B.claimUncapped("t1", "run-2", "cfg-1", limits)).snapshot();
+  assert.equal(snap.outputTokens, 3);
+  assert.equal(snap.inputTokens, 7);
+  assert.equal(snap.activeMs, 100);
+  // 配置身份变化拒绝
+  await assert.rejects(() => B.claimUncapped("t1", "run-3", "cfg-2", limits),
+                       (e: Error & {reason?: string}) => e.reason === "CONFIGURATION_CHANGED");
+});

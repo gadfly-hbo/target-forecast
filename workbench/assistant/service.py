@@ -87,21 +87,35 @@ class AssistantService:
 
     def _relay_orchestrated(self, result) -> dict:
         staged = [tc for tc in result.tool_calls if tc.get("stage_pending")]
-        pending = None
-        if staged:
-            tc = self._pending.get(staged[0].get("call_id") or "")
-            if tc is None:
-                return {"reply": result.reply or "（写提案登记已失效，请重试）",
-                        "tool_calls": result.tool_calls, "pending_confirmation": None}
-            pending = {"call_id": staged[0]["call_id"], "action": tc["name"], "args": tc["args"],
-                       "preview": self._preview(tc)}
-        return {"reply": result.reply, "tool_calls": result.tool_calls, "pending_confirmation": pending}
+        pending, pending_tc, dropped = None, None, 0
+        for tc in staged:
+            call_id = tc.get("call_id") or ""
+            entry = self._pending.get(call_id)
+            if entry is None:  # 已失效/重复登记
+                continue
+            if pending is None:
+                pending_tc, pending = entry, {
+                    "call_id": call_id, "action": entry["name"], "args": entry["args"],
+                    "preview": self._preview(entry)}
+            else:
+                # 单 pending 确认门：多写提案逐个来——其余取消，不留孤儿 pending（N1）
+                self._pending.pop(call_id, None)
+                dropped += 1
+        note = f"（另有 {dropped} 个写提案未一并提交，已取消——请逐个提出确认）" if dropped else ""
+        reply = (result.reply or "") + note
+        if staged and pending is None and result.reply is not None:
+            reply = result.reply or "（写提案登记已失效，请重试）"
+        return {"reply": reply, "tool_calls": result.tool_calls, "pending_confirmation": pending}
 
-    def exec_read(self, name: str, args: dict) -> str:
-        """sidecar 读工具代理入口（名门禁：非 x-write 才可执行）。"""
+    def exec_read(self, name: str, args: dict) -> dict:
+        """sidecar 读工具代理入口（名门禁：非 x-write 才可执行）。
+
+        返回 {summary, result}：summary 保前端/回放兼容，result 补摘要的信息损失。
+        """
         if name not in self._by_name or self._by_name[name]["x-write"]:
             raise ValueError(f"exec_read 只接受只读工具，拒绝：{name}")
-        return self._execute({"name": name, "args": args or {}})
+        summary, data = self._execute({"name": name, "args": args or {}}, with_data=True)
+        return {"summary": summary, "result": data}
 
     def stage(self, name: str, args: dict) -> dict:
         """sidecar 写提案登记入口（名门禁：x-write 才可登记；不执行效果）。"""
@@ -181,16 +195,19 @@ class AssistantService:
                for tc, s in summaries ],
         ]
 
-    def _execute(self, tc: dict) -> str:
+    def _execute(self, tc: dict, with_data: bool = False):
+        """执行 action 并返回中文摘要；with_data=True 时返回 (摘要, 原始数据)——
+        exec_read 用原始数据补摘要的信息损失，Legacy 调用方（chat 循环/_confirm）只取摘要。"""
         name, args = tc["name"], (tc["args"] or {})
         tool = self._by_name[name]["x-tool"]
         action = self._by_name[name]["x-action"]
         if action == "get_state":  # 三工具共享：元数据优先于全名判定
-            return _summarize_state(tool, self.http("GET", f"/t/{tool}/api/state", None))
-        handler = _EXECUTORS.get(name)
-        if handler is None:
-            return f"已执行 {name}"
-        return handler(self, args)
+            data = self.http("GET", f"/t/{tool}/api/state", None)
+            out = (_summarize_state(tool, data), data)
+        else:
+            handler = _EXECUTORS.get(name)
+            out = handler(self, args) if handler is not None else (f"已执行 {name}", None)
+        return out if with_data else out[0]
 
 
 def _summarize_state(tool: str, data: dict) -> str:
@@ -222,7 +239,8 @@ def _exec_forecast_calc(svc, args):
     data = svc.http("POST", "/t/forecast/api/calc", {"scenarios": args.get("scenarios") or {}})
     nets = {r["scenario"]: round(sum(x["GMV_主口径"] for x in data["consolidated"] if x["scenario"] == r["scenario"]), 0)
             for r in data["consolidated"]}
-    return "全渠道年化GMV（按情景）：" + "；".join(f"{k} {v:.0f} 元" for k, v in nets.items())
+    return ("全渠道年化GMV（按情景）：" + "；".join(f"{k} {v:.0f} 元" for k, v in nets.items()),
+            {"nets": nets, "consolidated": data.get("consolidated")})
 
 
 def _exec_forecast_set_scenario_params(svc, args):
@@ -233,7 +251,7 @@ def _exec_forecast_set_scenario_params(svc, args):
     merged = {n: {**p, **(saved.get("scenarios") or {}).get(n, {})} for n, p in state["scenarios"].items()}
     data = svc.http("POST", "/t/forecast/api/calc", {"scenarios": merged})
     gmv = sum(x["GMV_主口径"] for x in data["consolidated"] if x["scenario"] == sc)
-    return f"挑战情景已保存并重算：年化GMV {gmv:.0f} 元".replace("挑战", sc)
+    return f"挑战情景已保存并重算：年化GMV {gmv:.0f} 元".replace("挑战", sc), {"gmv": gmv}
 
 
 def _exec_roi_calc(svc, args):
@@ -243,7 +261,7 @@ def _exec_roi_calc(svc, args):
     if "scenarios" not in body:
         body["scenarios"] = svc.http("GET", "/t/roi/api/state", None)["scenarios"]
     data = svc.http("POST", "/t/roi/api/calc", body)
-    return _summarize_roi_calc(data, args)
+    return _summarize_roi_calc(data, args), data
 
 
 def _exec_roi_set_plan_params(svc, args):
@@ -259,21 +277,23 @@ def _exec_roi_set_plan_params(svc, args):
     base = data["scenarios"].get("基准", {})
     net = next((p["net"] for p in base.get("plans", []) if p["name"] == plan), None)
     if net is None:
-        return f"计划「{plan}」参数已保存，但基准结果中未找到该计划"
-    return f"计划「{plan}」参数已保存，基准情景净贡献 {net:.2f} 元"
+        return f"计划「{plan}」参数已保存，但基准结果中未找到该计划", {"net": None}
+    return f"计划「{plan}」参数已保存，基准情景净贡献 {net:.2f} 元", {"net": net}
 
 
 def _exec_coupon_list_runs(svc, args):
     data = svc.http("GET", "/t/coupon/api/runs", None)
     runs = data if isinstance(data, list) else data.get("runs", [])
-    return f"已封存运行 {len(runs)} 个" + (f"：{', '.join(r[:8] for r in runs[:3])}" if runs else "")
+    return (f"已封存运行 {len(runs)} 个" + (f"：{', '.join(r[:8] for r in runs[:3])}" if runs else ""),
+            {"runs": runs})
 
 
 def _exec_coupon_compare(svc, args):
     spec = svc.http("GET", f"/t/coupon/api/scenario/{args['scenario_id']}", None)
     data = svc.http("POST", "/t/coupon/api/compare", {"scenario": spec})
     labels = [r["label"] for r in data.get("rows", [])]
-    return f"场景 {args['scenario_id']} 比较完成：{len(labels)} 个候选（含无券基准）"
+    return (f"场景 {args['scenario_id']} 比较完成：{len(labels)} 个候选（含无券基准）",
+            {"labels": labels, "ranking": data.get("ranking"), "rows": data.get("rows")})
 
 
 _EXECUTORS = {

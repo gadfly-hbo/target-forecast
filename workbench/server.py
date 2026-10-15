@@ -91,9 +91,8 @@ def make_handler(registry: Registry, assistant=None):
                 # Path A：sidecar 读工具代理（名门禁在 service.exec_read）
                 try:
                     body = Responder(self).read_body()
-                    summary = assistant.exec_read(str(body.get("name", "")), body.get("args") or {})
-                    Responder(self).send(200, json_bytes({"summary": summary}),
-                                         "application/json; charset=utf-8")
+                    out = assistant.exec_read(str(body.get("name", "")), body.get("args") or {})
+                    Responder(self).send(200, json_bytes(out), "application/json; charset=utf-8")
                 except (ValueError, KeyError, TypeError) as exc:
                     Responder(self).send(422, json_bytes({"error": str(exc)}),
                                          "application/json; charset=utf-8")

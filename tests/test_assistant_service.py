@@ -325,3 +325,31 @@ def test_exec_read_and_stage_name_gating():
     out = svc.stage("forecast__set_scenario_params", {"scenario": "挑战", "params": {"new_customers_growth": 0.2}})
     assert out["call_id"] and out["action"] == "forecast__set_scenario_params" and out["preview"]
     assert out["call_id"] in svc._pending
+
+
+def test_orchestrated_multi_write_relays_first_cancels_rest():
+    """N1：多写 run 只透传首个 pending，其余取消不留孤儿，并如实告知。"""
+    from workbench.assistant.backend import ChatResult
+    svc, http = _svc3()
+    a = svc.stage("roi__set_plan_params", {"plan": "计划1", "params": {"cvr": 0.05}})
+    b = svc.stage("forecast__set_scenario_params", {"scenario": "挑战", "params": {"new_customers_growth": 0.1}})
+    result = ChatResult(reply="已登记", orchestrated=True, tool_calls=[
+        {"name": "roi__set_plan_params", "args": a["args"], "summary": "s1", "stage_pending": True,
+         "call_id": a["call_id"], "preview": "p1"},
+        {"name": "forecast__set_scenario_params", "args": b["args"], "summary": "s2", "stage_pending": True,
+         "call_id": b["call_id"], "preview": "p2"}])
+    svc.backend = OrchestratedBackend(result)
+    res = svc.chat({"message": "两个都调", "history": [], "tool_id": "roi"})
+    assert res["pending_confirmation"]["call_id"] == a["call_id"]      # 透传首个
+    assert set(svc._pending) == {a["call_id"]}                          # 其余已取消，无孤儿
+    assert "1 个写提案未一并提交" in res["reply"] and "已取消" in res["reply"]
+
+
+def test_exec_read_returns_raw_result():
+    """摘要有损修复：exec_read 返回 {summary, result}，result 原文补齐信息。"""
+    svc, _ = _svc3()
+    out = svc.exec_read("roi__get_state", {})
+    assert out["summary"] == "投放 ROI：4 个演示计划（合成假设）"
+    assert out["result"]["plans"] == [{"name": f"计划{i}"} for i in range(1, 5)]  # 计划名终于可得
+    out2 = svc.exec_read("coupon__list_runs", {})
+    assert out2["result"]["runs"] == COUPON_STATE["runs"]
