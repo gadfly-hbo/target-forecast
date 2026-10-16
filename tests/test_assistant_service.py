@@ -342,7 +342,7 @@ def test_orchestrated_multi_write_relays_first_cancels_rest():
     res = svc.chat({"message": "两个都调", "history": [], "tool_id": "roi"})
     assert res["pending_confirmation"]["call_id"] == a["call_id"]      # 透传首个
     assert set(svc._pending) == {a["call_id"]}                          # 其余已取消，无孤儿
-    assert "1 个写提案未一并提交" in res["reply"] and "已取消" in res["reply"]
+    assert "1 个写提案未一并提交" in res["reply"] and "请逐个提出确认" in res["reply"]
 
 
 def test_exec_read_returns_raw_result():
@@ -353,3 +353,103 @@ def test_exec_read_returns_raw_result():
     assert out["result"]["plans"] == [{"name": f"计划{i}"} for i in range(1, 5)]  # 计划名终于可得
     out2 = svc.exec_read("coupon__list_runs", {})
     assert out2["result"]["runs"] == COUPON_STATE["runs"]
+
+
+# ---------- (c)-resume：checkpoint_staged 透传与确认双模 ----------
+
+def test_relay_checkpoint_staged_builds_pending_with_key():
+    from workbench.assistant.backend import ChatResult
+    svc, http = _svc3()
+    result = ChatResult(reply="提案待确认", orchestrated=True, tool_calls=[
+        {"name": "roi__set_plan_params", "args": {"plan": "计划1", "params": {"cvr": 0.05}},
+         "summary": "写提案待确认", "stage_pending": True, "call_id": "cp123", "checkpoint_staged": True}])
+    svc.backend = OrchestratedBackend(result)
+    res = svc.chat({"message": "调参", "history": [], "tool_id": "roi"})
+    assert res["pending_confirmation"]["call_id"] == "cp123"
+    assert svc._pending["cp123"]["checkpoint_key"] == "cp123"
+    assert "preview" in res["pending_confirmation"]
+    assert len(http.calls) == 0  # 不调 /stage（检查点路径）
+
+
+class _FakeResumeBackend(OrchestratedBackend):
+    """支持 resume 注入的 PiSidecarBackend 替身（isinstance 检查走 duck 类型）。"""
+
+
+def test_confirm_via_resume_ok_passthrough():
+    from workbench.assistant.backend import PiSidecarBackend as _PSB
+    svc, http = _svc3()
+    svc._pending["cp1"] = {"name": "roi__set_plan_params", "args": {"plan": "P"}, "checkpoint_key": "cp1"}
+    executed = {}
+
+    class B(_PSB):
+        def chat(self, messages, tools, write_names=None):
+            raise AssertionError("不应走 chat")
+
+        def resume(self, call_id):
+            executed["call_id"] = call_id
+            return "ok", {"reply": "已重算完成", "tool_calls": [
+                {"name": "roi__set_plan_params", "args": {"plan": "P"}, "summary": "净贡献 100.00 元"}]}
+
+    svc.backend = B()
+    res = svc._confirm("cp1")
+    assert res["reply"] == "已重算完成"
+    assert executed["call_id"] == "cp1"
+    assert "cp1" not in svc._pending
+
+
+def test_confirm_via_resume_definite_failure_degrades_once():
+    from workbench.assistant.backend import PiSidecarBackend as _PSB
+    svc, http = _svc3()
+    svc._pending["cp2"] = {"name": "coupon__list_runs", "args": {}, "checkpoint_key": "cp2"}
+    # 用只读工具当"写"来观察降级执行——改为正确写工具但 http 记录调用
+    svc._pending["cp2"] = {"name": "roi__set_plan_params", "args": {"plan": "计划1", "params": {}},
+                           "checkpoint_key": "cp2"}
+    calls_before = len(http.calls)
+
+    class B(_PSB):
+        def chat(self, messages, tools, write_names=None):
+            from workbench.assistant.backend import ChatResult
+            return ChatResult(reply="降级措辞")
+
+        def resume(self, call_id):
+            raise BackendUnavailable("/resume 失败（未执行）：HTTP 404")
+
+    svc.backend = B()
+    res = svc._confirm("cp2")
+    assert res["reply"] == "降级措辞"
+    assert len(http.calls) > calls_before  # 降级路径执行了写舞步（http 回环）
+    assert "cp2" not in svc._pending
+
+
+def test_confirm_via_resume_maybe_executed_does_not_reexecute():
+    from workbench.assistant.backend import PiSidecarBackend as _PSB
+    svc, http = _svc3()
+    svc._pending["cp3"] = {"name": "roi__set_plan_params", "args": {"plan": "P"}, "checkpoint_key": "cp3"}
+    calls_before = len(http.calls)
+
+    class B(_PSB):
+        def resume(self, call_id):
+            return "maybe_executed", {"error": "终稿轮失败"}
+
+    svc.backend = B()
+    res = svc._confirm("cp3")
+    assert "可能已执行" in res["reply"]
+    assert len(http.calls) == calls_before  # 不降级执行
+    assert "cp3" not in svc._pending
+
+
+def test_confirm_via_resume_timeout_puts_back_and_skips():
+    from workbench.assistant.backend import PiSidecarBackend as _PSB, _ResumeTimeout
+    svc, http = _svc3()
+    svc._pending["cp4"] = {"name": "roi__set_plan_params", "args": {"plan": "P"}, "checkpoint_key": "cp4"}
+    calls_before = len(http.calls)
+
+    class B(_PSB):
+        def resume(self, call_id):
+            raise _ResumeTimeout("timed out")
+
+    svc.backend = B()
+    res = svc._confirm("cp4")
+    assert "恢复超时" in res["reply"] and "未执行" in res["reply"]
+    assert len(http.calls) == calls_before            # 不执行
+    assert svc._pending["cp4"]["checkpoint_key"] == "cp4"  # 放回，可重试

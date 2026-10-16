@@ -96,6 +96,16 @@ def make_handler(registry: Registry, assistant=None):
                 except (ValueError, KeyError, TypeError) as exc:
                     Responder(self).send(422, json_bytes({"error": str(exc)}),
                                          "application/json; charset=utf-8")
+            elif self.path == "/api/assistant/exec_write" and assistant is not None:
+                # (c)-resume：恢复循环的写执行入口（名门禁+call_id 一次性在 service.exec_write）
+                try:
+                    body = Responder(self).read_body()
+                    out = assistant.exec_write(str(body.get("call_id", "")),
+                                               str(body.get("name", "")), body.get("args") or {})
+                    Responder(self).send(200, json_bytes(out), "application/json; charset=utf-8")
+                except (ValueError, KeyError, TypeError) as exc:
+                    Responder(self).send(422, json_bytes({"error": str(exc)}),
+                                         "application/json; charset=utf-8")
             elif self.path == "/api/assistant/stage" and assistant is not None:
                 # Path A：sidecar 写提案登记（名门禁在 service.stage；不执行效果）
                 try:

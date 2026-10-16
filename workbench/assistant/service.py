@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 from . import tools as tools_mod
+from .backend import BackendUnavailable, PiSidecarBackend, _ResumeTimeout
 
 SYSTEM_PROMPT = (
     "你是测算工作台的助手。工作台有三个测算工具：目标测算（forecast，人货场三视角 GMV 目标）、"
@@ -87,21 +88,27 @@ class AssistantService:
 
     def _relay_orchestrated(self, result) -> dict:
         staged = [tc for tc in result.tool_calls if tc.get("stage_pending")]
-        pending, pending_tc, dropped = None, None, 0
+        pending, dropped = None, 0
         for tc in staged:
             call_id = tc.get("call_id") or ""
-            entry = self._pending.get(call_id)
-            if entry is None:  # 已失效/重复登记
-                continue
-            if pending is None:
-                pending_tc, pending = entry, {
-                    "call_id": call_id, "action": entry["name"], "args": entry["args"],
-                    "preview": self._preview(entry)}
+            name, args = tc.get("name"), tc.get("args") or {}
+            if tc.get("checkpoint_staged"):
+                # (c)-resume：sidecar 已落检查点 stash，条目自带提案——直接建 pending
+                entry = {"name": name, "args": args, "checkpoint_key": call_id}
             else:
-                # 单 pending 确认门：多写提案逐个来——其余取消，不留孤儿 pending（N1）
-                self._pending.pop(call_id, None)
+                entry = self._pending.get(call_id)  # /stage 登记的旧路径
+                if entry is None:
+                    continue
+            if pending is None:
+                self._pending[call_id] = entry
+                pending = {"call_id": call_id, "action": entry["name"], "args": entry["args"],
+                           "preview": self._preview(entry)}
+            else:
+                # 单 pending 确认门：多写提案逐个来（N1/A3）
+                if not tc.get("checkpoint_staged"):
+                    self._pending.pop(call_id, None)  # stage 路径：sidecar 已登记，弹出防孤儿
                 dropped += 1
-        note = f"（另有 {dropped} 个写提案未一并提交，已取消——请逐个提出确认）" if dropped else ""
+        note = f"（另有 {dropped} 个写提案未一并提交，请逐个提出确认）" if dropped else ""
         reply = (result.reply or "") + note
         if staged and pending is None and result.reply is not None:
             reply = result.reply or "（写提案登记已失效，请重试）"
@@ -146,6 +153,9 @@ class AssistantService:
 
     def _confirm(self, call_id: str) -> dict:
         tc = self._pending.pop(call_id)  # 一次性；重复确认 KeyError
+        key = tc.get("checkpoint_key")
+        if key and isinstance(self.backend, PiSidecarBackend):
+            return self._confirm_via_resume(call_id, tc, key)
         summary = self._execute(tc)
         messages = [
             {"role": "system", "content": "用户已确认参数变更，请简述结果。"},
@@ -171,6 +181,56 @@ class AssistantService:
         return f"{name} {args}"
 
     # ---------- 执行 ----------
+
+    def _confirm_via_resume(self, call_id: str, tc: dict, key: str) -> dict:
+        """(c)-resume：确认即恢复——sidecar 在授权循环内重放并执行写，完整上下文终稿。
+
+        三路分类（GRILL 包 3）：成功透传；明确失败（404/500 executed:false）降级现行路径；
+        500 executed:true 报"可能已执行"不降级；超时放回 _pending 不执行。
+        """
+        try:
+            out = self.backend.resume(key)
+        except _ResumeTimeout as exc:
+            self._pending[call_id] = tc  # 放回：重试承诺成立（重试将 404→降级，仍需用户再确认）
+            return {"reply": f"恢复超时（{exc}），未执行写入。请再次点击确认重试。",
+                    "tool_calls": [], "pending_confirmation": None}
+        except BackendUnavailable as exc:
+            out = None  # 明确失败：连接拒绝/非 2xx
+            self._last_resume_error = str(exc)
+        if out is None:
+            summary = self._execute(tc)  # 降级：现行路径（效果恰一次——sidecar 未执行）
+            messages = [
+                {"role": "system", "content": "用户已确认参数变更，请简述结果。"},
+                {"role": "user", "content": f"已确认执行 {tc['name']}，请简述结果。"},
+                {"role": "tool", "name": tc["name"], "content": summary},
+            ]
+            final = self.backend.chat(messages, [])
+            return {"reply": final.reply or summary, "tool_calls": [{**tc, "summary": summary}],
+                    "pending_confirmation": None}
+        kind, body = out
+        if kind == "maybe_executed":
+            return {"reply": "写入可能已执行（恢复中断），请检查当前参数后决定是否重试。",
+                    "tool_calls": [{**tc, "summary": "执行状态未知，请人工核对"}],
+                    "pending_confirmation": None}
+        # ok：写已由 exec_write 在授权循环内执行，透传完整上下文终稿
+        calls = body.get("tool_calls") or []
+        summary = next((c.get("summary") for c in calls if c.get("name") == tc.get("name")), "已执行")
+        return {"reply": body.get("reply") or summary, "tool_calls": calls,
+                "pending_confirmation": None}
+
+    def exec_write(self, call_id: str, name: str, args: dict):
+        """(c)-resume 恢复路径的写执行入口（sidecar /resume 闭包代理调用）。
+
+        名门禁（仅 x-write）；call_id 一次性弹出 _pending 后执行——与
+        _confirm 的执行语义同构（用户已确认才可能到达此端点）。
+        """
+        if name not in self._by_name or not self._by_name[name]["x-write"]:
+            raise ValueError(f"exec_write 只接受写工具，拒绝：{name}")
+        tc = self._pending.pop(call_id, None)
+        if tc is None:
+            raise ValueError(f"提案不存在或已处理：{call_id}")
+        summary, data = self._execute({"name": name, "args": args or {}}, with_data=True)
+        return {"summary": summary, "result": data}
 
     def _refuse(self, messages: list, result) -> dict:
         # 未知能力：把「不支持」作为 tool 结果回灌，让后端组织拒答话术

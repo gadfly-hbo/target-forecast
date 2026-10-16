@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -14,6 +15,10 @@ from dataclasses import dataclass, field
 
 class BackendUnavailable(RuntimeError):
     """无可用 LLM 后端（缺 key / sidecar 不可达）。"""
+
+
+class _ResumeTimeout(Exception):
+    """sidecar /resume 超时——执行状态未知，调用方不得自动降级执行。"""
 
 
 @dataclass
@@ -71,6 +76,39 @@ class PiSidecarBackend:
                 return r.status == 200
         except Exception:  # noqa: BLE001 —— 探测只问可达性
             return False
+
+    def resume(self, call_id: str):
+        """(c)-resume：确认后恢复授权循环。返回 ('ok'|'maybe_executed', body)；
+        明确失败抛 BackendUnavailable（调用方降级）；超时抛 _ResumeTimeout（不执行）。"""
+        req = urllib.request.Request(self.url + "/resume",
+                                     data=json.dumps({"call_id": call_id}).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return "ok", json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "ignore")
+            try:
+                parsed = json.loads(body)
+            except (ValueError, TypeError):
+                parsed = {}
+            if exc.code == 404:
+                raise BackendUnavailable(f"/resume 提案不存在或已处理：{body[:200]}") from exc
+            if parsed.get("executed"):
+                return "maybe_executed", parsed
+            if "executed" in parsed:
+                raise BackendUnavailable(f"/resume 失败（未执行）：{body[:200]}") from exc
+            return "maybe_executed", parsed  # 响应体不可解析：执行状态未知，保守处理
+        except (socket.timeout, TimeoutError) as exc:
+            raise _ResumeTimeout(str(exc)) from exc
+        except urllib.error.URLError as exc:
+            if isinstance(getattr(exc, "reason", None), (socket.timeout, TimeoutError)):
+                raise _ResumeTimeout(str(exc)) from exc
+            raise BackendUnavailable(f"/resume 不可达：{exc}") from exc
+        except BackendUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise BackendUnavailable(f"/resume 异常：{exc}") from exc
 
     def chat(self, messages: list[dict], tools: list[dict], write_names=None) -> ChatResult:
         body = json.dumps({"messages": messages, "tools": tools,
