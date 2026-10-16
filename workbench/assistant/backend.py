@@ -85,7 +85,18 @@ class PiSidecarBackend:
                                      headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return "ok", json.loads(resp.read().decode("utf-8"))
+                raw = resp.read().decode("utf-8")
+        except (socket.timeout, TimeoutError) as exc:
+            raise _ResumeTimeout(str(exc)) from exc
+        except urllib.error.HTTPError:
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 读体中断：执行状态未知
+            return "maybe_executed", {"error": f"响应读取中断：{exc}"}
+        try:
+            return "ok", json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            # 2xx 但响应体不可解析：写入状态未知——保守 maybe，不降级重执行（REVIEW F2）
+            return "maybe_executed", {"error": f"响应不可解析：{exc}; body={raw[:120]}"}
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "ignore")
             try:

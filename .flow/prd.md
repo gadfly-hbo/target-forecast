@@ -1,56 +1,46 @@
-# PRD：Path A 助手全托管迁移 pi-agent-runtime
+# PRD：(c)-resume 检查点重放
 
-> 规格源：`.flow/proposal.md`。红队：`.flow/red-team.md`（GO，4 先决全采纳）。四先决在本文钉死；GRILL 只补残余开放面。
+> 规格源：`.flow/proposal.md`。红队：`.flow/red-team.md`（GO；实证 T1-T7 + A1 致命修正 + A2-A5 强制修正 + R1-R7 硬约束，全部采纳）。
 
-## Solution（架构钉死）
+## Solution（机制按红队实证修正）
 
-sidecar `/chat` 重写为 `pi-agent-runtime@0.4.3`（`file:../../pi-agent-runtime`）：
+### sidecar 侧（server.ts）
 
-1. **运行时装配**（模块级单例）：共享 `createMemoryBudgetStore` + JSONL AuditSink（`workspace/assistant/audit.jsonl`，同步 append）+ 稳定 taskId（进程生命期，如 `workbench-assistant`）+ **`cumulative:'unlimited'`**（P4）+ modelTimeoutMs/toolTimeoutMs/controlTimeoutMs/maxOutputTokens；`createPiTransport`（openai-completions，MIMO env 三件套沿用 WORKBENCH_LLM_*）；per-request `createRuntime`（闭包捕 per-请求工具）。
-2. **工具模型**（红队先决①，选 **(c)-simple**，(c)-resume 留增强）：
-   - 读工具（get_state/calc/list_runs/compare…）：`execute()` HTTP 代理到 workbench API，原文 JSON 回模型（1 MiB 上限内）；中文摘要问题见开放面 1
-   - 写工具（set_plan_params/set_scenario_params/modify_scenario）：`execute()` 只向 workbench `POST /api/assistant/stage`（新端点）登记 pending（良性效果，Authorization 放行），返回"已登记待确认"给模型；**确认后的效果执行留在 Python 既有 `_exec_*` 写执行器**（多次 HTTP 舞步+中文摘要原样复用）——P1/P3 认可形态，确认门 UX 零变化
-   - 工具定义（name/description/parameters）从三工具 plugin manifest 生成且**字节稳定**；execute 闭包 per-request（hash 不含 execute）
-3. **ChatResult 判别**（先决③）：`ChatResult` 加 `orchestrated: bool`（Echo=False 走既有循环；Pi 路径=True，service.py 不再执行/登记其 tool_calls，仅透传摘要给前端）；sidecar /chat 响应 `{reply, tool_calls:[{name,args,summary,stage_pending}], orchestrated:true}`——`stage_pending` 标记写提案已登记，前端确认流复用既有 pending_confirmation 渲染
-4. **MIMO system 合并**（先决④）：sidecar 继续把 system 并入 prompt 首条 user（不用 BaseRequest.system）；thinkingProtocol 不启用（reasoning:false 现状）
-5. **历史**：Python 拍平进 prompt（同现状语义），不用 checkpoint 播种（(c)-resume 启用时再引入）
-6. **降级链**：无 key /chat→503（带指引文案）；无 node/dist→不启动 sidecar→直连/Echo 探测链不变；EchoBackend 与全部 service 测试零改动
+1. **写工具授权拒绝**：`createAssistant` 的 authorize 对 `kind:'tool' && effect==='write'` 返回 **false**（读/模型/发布放行）→ run 以 `blocked/AUTHORITY_REQUIRED` 结束（写效果永不发生在未确认 run 内，P3）。
+2. **检查点 stash（A1 修正）**：`saveCheckpoint` 回调按规则留存——"最后一条 assistant 含未确认 calls 且无 toolFailed 结果的**第一份 ready**"（跳过 tool-admitted 与 toolFailed ready）；以 `call_id`（该未确认调用的 id）为键存模块级 stash（含 checkpoint JSON + 提案信息）。stash 上限与 checkpoint 2MB 守卫（R6）：超限不 stash，退化为 c-simple 响应。
+3. **/chat blocked 响应改 200**（次级修正）：`{reply: 检查点 assistant text 前缀 + 固定确认文案, tool_calls:[{name,args,summary:"写提案待确认",stage_pending:true,call_id,preview?}], orchestrated:true, checkpoint_staged:true}`——preview 由 Python 侧 `_preview` 生成（现状 stage 端点职责并入：blocked 路径不调 /stage，Python 见 `checkpoint_staged` 直接用响应内 args 建 pending）。
+4. **新端点 POST /resume {call_id}**（A2 修正）：**只收 call_id**，从自有 stash 取 checkpoint（不信任任何回传 blob）；弹出（一次性）。构造 runAgent：`{taskId: 与 /chat 同派生, prompt:'', checkpoint, tools: 同一定义集+同写名册, limits: 同一常量, saveCheckpoint: 同 stash 逻辑, signal: 140s}`（R1/R2/A4 不变量）。
+5. **两身份 execute**：/chat 路径写闭包**永不执行**（authorize 先拒）；/resume 路径构造时：**首个未确认写**闭包代理壳新端点 `/api/assistant/exec_write`（带 call_id），**其余写**闭包返回良性工具结果"已取消（请逐个确认）"（A3/R5）；读工具闭包照旧代理 exec_read（重放批内可能含读）。
+6. 响应：`{reply: 终稿, tool_calls: collect 透传, orchestrated:true}`。
 
-## 硬约束（沿用 proposal 1-6）
+### Python 侧
 
-标准 v0.3 全规则；不修改 pi-agent-runtime 仓；确认门语义不弱化（写效果前必须有用户确认）；无新 Python 依赖、Node 零新增 dep（node:test 内建）；pytest 全绿；真实冒烟按 P6——**key 已配置（见 Testing Decisions），真实冒烟按 P6 有界执行**。
+7. **`/api/assistant/exec_write` 端点**：`AssistantService.exec_write(call_id, name, args)`——名门禁（仅 x-write）；**call_id 一次性弹出 `_pending`** 后执行既有 `_exec_*` 写执行器（四段舞步+中文摘要原样复用），返回 `{summary, result}`。与 `_confirm` 的执行语义同构（写一次测试复用思路）。
+8. **`_relay_orchestrated` 扩展**：见 `checkpoint_staged:true` 的 tool_call → 建 `_pending[call_id] = {name, args, checkpoint_key: call_id}`（不再调 /stage）；`pending_confirmation` 形状不变（前端零改动）。
+9. **`_confirm` 双模分支（A5）**：条目含 `checkpoint_key` → 调 sidecar `POST /resume {call_id}`：成功 → 透传 `{reply, tool_calls}`（写已由 exec_write 执行）；**明确失败（连接拒绝/非 2xx/4xx stash 失效）→ 降级现行路径**（弹出 _pending + `_execute` + 3 消息措辞）；**超时不自动降级执行**（保守报错"恢复超时，请重试或检查参数是否已变更"）。条目无 checkpoint_key（Echo/直连）→ 现行路径逐字节不变。
+10. **PiSidecarBackend**：`resume(call_id)` 方法（POST /resume，错误分类：连接错误/HTTPError→明确失败；timeout→超时类）。
 
-## 开放面（GRILL 处理）
+## 硬约束（沿用 proposal 1-6 + 红队强制项）
 
-1. 工具结果中文摘要归属：execute() 回原文 JSON（模型自己消化，上下文膨胀）vs 代理层调 workbench 摘要端点（新端点 or 复用 assistant stage 响应）vs 摘要下沉到 stage/执行端点统一返回
-2. `/api/assistant/stage` 端点形状：复用 service.py 现有 pending 登记（call_id/preview 生成）还是 sidecar 自带 call_id 透传
-3. runAgent 的 prompt 组装：Python messages → prompt 的拍平格式（保历史语义，含 tool 结果回灌格式）
-4. limits 数值与 AbortSignal 映射（TIMEOUT_MS 120s 沿用？controlTimeoutMs 取值）
-5. node --test 合成测试的范围（门变体/blocked 映射/503/双登记防回归）与放置（assistant-sidecar/test/）
-6. audit.jsonl 轮转/上限（长期运行膨胀）
-7. 前端 app.js 需要的最小改动（orchestrated 响应的渲染路径确认）
+A1 stash 规则 / A2 call_id-only / A3 多写良性取消 / A4 构造字节一致（不变量+防回归测试）/ R1 prompt:'' / R2 saveCheckpoint 同带、禁 parallel / R6 2MB 守卫 / A5 降级判据。Echo 套件与前端零改动；真实冒烟走完整链。
 
 ## Testing Decisions
 
-- **node --test 合成套件**（SDK ./testing 假 transport）：读工具代理循环、写工具 stage-不执行、Authorization 拒绝→blocked、无 key 503、双登记防回归（stub backend orchestrated=True 不触发 Python 循环）
-- pytest：全部既有 assistant 测试零改动绿（Echo 不经 sidecar）；`test_assistant_http` 的回环落盘断言绿；全量 223+
-- 构建/启动：`npm install && npm run build`（file: 依赖实测）；boot + /health + 无 key 503
-- 真实冒烟：**已解除阻塞**——key 找到于 ~/.pi/agent/auth.json [xiaomi-token-plan-cn]（用户指引"从 pi-agent 里找"），已写 workspace/assistant.env（0600、gitignored）；按 P6 有界执行（一次读问题 + 一次写提案+确认链）
+- **node --test 移植红队 T1-T3/T5/T7 要点**：blocked+三份检查点序、ready 恢复免模型重放+写恰一次、构造不一致→CONFIGURATION_CHANGED 防回归、双写批次一执行一良性取消、伪造 blob 不被信任（/resume 只认 stash）。
+- **pytest**：exec_write 名门禁+call_id 一次性；_relay_orchestrated 的 checkpoint_staged 分支；_confirm 双模（FakeSidecar 明确失败→降级恰一次；超时→不执行；成功→透传）；Echo 既有套件零改动绿。
+- **真实 MIMO 有界冒烟**：写提案→blocked(200)→pending_confirmation→确认→/resume→exec_write 执行→落盘→完整上下文终稿；audit 含 tool.finished 写记录。
 
 ## Out of Scope
 
-- (c)-resume checkpoint 重放（后续增强）；createSessionRuntime/原生 Harness；thinkingProtocol:'mimo-chat'；Echo 协议改动；pi-agent-runtime 仓任何修改
+- createSessionRuntime/0.4.0 session 契约；checkpoint 持久化到磁盘（重启丢 stash→降级路径覆盖，红队 R7 接受）；固定确认文案的产品措辞打磨（preview 兜底）；长会话 2MB 逼近监控（守卫+降级已覆盖）
 
 ---
 
-## GRILL 决议（第 1 轮 author-blind 子代理 6 包全按推荐采纳；第 2 轮零新增——converged after 2 rounds）
+## GRILL 决议（第 1 轮 author-blind 5 包全采纳；第 2 轮零新增——converged）
 
-1. **读工具摘要**：新端点 `POST /api/assistant/exec_read {name,args}` → Python 复用 `AssistantService._execute`（含全部中文摘要）→ 返回 `{summary}`。唯一保行为等价选项；业务逻辑零 TS 移植；前端 `tc.summary` 保真。摘要有损为既有缺口（记后续增强：响应加 `result` 原文），不入本 diff。
-2. **stage 端点 + orchestrated 回落**：`POST /api/assistant/stage {tool_id,name,args}` 复用 `_stage_write` 登记段（Python 生成 call_id/uuid + `_pending` + `_preview` 回环取旧值）→ 返回 `{call_id,action,args,preview}`；sidecar 写工具 execute() 返回 `{staged:true,call_id,preview}` 给模型。**双端点名门禁**：/stage 只收 x-write、/exec_read 只收非 x-write（击穿=违反确认门硬约束）。service.py 见 `stage_pending` 用自身 `_pending[call_id]` 重建 `pending_confirmation`（不二次登记）→ **app.js 零改动**（确认框只消费 pending_confirmation，app.js:128-141）。
-3. **【阻塞前置】workbench URL 传递**：sidecar 现不知 workbench 地址且 `maybe_start_sidecar` 在 httpd 绑定前启动（server.py:100-107；测试 port 0）——调整 serve() 顺序：先建 httpd + `bind_port` 再拉 sidecar，env 传 `WORKBENCH_SHELL_URL=http://127.0.0.1:{port}`（maybe_start_sidecar 加参数）。
-4. **prompt 拍平**：/chat 线协议不动（OpenAI 形 messages+tools）；**tool 定义保留 x-write 私有标志**发给 sidecar（映射 SDK `Tool.effect`）；拍平格式=「system 首段 + 角色行历史（用户：/助手：/工具 X 返回：…仅确认路径）+ 当前 user」；run 内多轮由 SDK 原生 toolResult 承载。
-5. **limits 五元组**（uncapped 恰好五键，多则 INVALID_REQUEST）：modelTimeoutMs=120000 / toolTimeoutMs=120000 / controlTimeoutMs=10000 / maxOutputTokens=8192（**整 run 共享**——即新轮数界，MAX_ROUNDS=4 在 orchestrated 路径自然消失，语义变化明示）/ 整 run `AbortSignal.timeout(140000)`（< Python 150s socket）。**并发串行化**：sidecar 模块级 promise 队列（同 taskId lease 唯一，并发第二请求会 TASK_BUSY）。
-6. **audit 轮转**：仅启动时检查 `workspace/assistant/audit.jsonl` >5MiB → 删旧 .1、改名留一（run 中绝不轮转——AUDIT_FAILED 杀 run）。
-7. **测试缝**：server.ts 抽 `handleChat`/拍平/装配为可注入导出 + `if (process.argv[1] === fileURLToPath(import.meta.url))` 入口守卫（dist/server.js 仍为启动入口）；假 transport 用**手写脚本式**（./testing 的 replay 逐字节匹配 prompt 全文，格式一改全红——不用；SDK 示例先例 offline.ts，toolCall 用 kind:'tool'）；node --test 套件=PRD 五例+响应契约断言（orchestrated:true+summary 形状）；**双登记防回归放 pytest**（stub 后端 orchestrated=True → service.py 不调 _execute/_stage_write、响应含重建 pending_confirmation）。
-
-UI-GATE skipped — 前端 app.js 零改动、确认 UX 逐字节保持（包 2 决议），无新用户可见 UI 面。
+- **代码已裁定开放点 5**：早前已确认的读**绝不重放**（pi-adapter.ts:569-577 `slice(0, assistantIndex)` 恢复为上下文；已确认结果经 observedTools→restoredResults 短路，execute 不触发）；与写同批未执行的读会在恢复时重新走 exec_read。
+- **包 1 stash**：模块级 `Map<call_id,{checkpoint,createdAt,proposal}>`，call_id 由 sidecar `crypto.randomUUID().slice(0,12)` 新铸（非模型 id）；**覆盖语义**——saveCheckpoint 维护单一 candidate，每收到合格 ready（state==='ready' ∧ 最后一条 assistant 有未配对 calls ∧ 无 toolFailed）就覆盖（"只存第一份永不覆盖"在多批 run 会错存读批）；blocked 收场才落 Map。多写批只按首个未确认写建一条 stash + 只发一个 pending 条目（防 Python 多 pending→第二写降级真执行违背 A3）。上限 8 条 FIFO + 逐条 2MiB 守卫（validation.ts:86 对齐），超限不 stash、条目无 checkpoint_staged → Python 建**无** checkpoint_key pending = 退化 c-simple 的落地。随进程内存无 TTL（R7）。
+- **包 2 blocked 响应**：200；`checkpoint_staged` 放 **tool_call 条目内**（ChatResult 零结构改动透传）；reply = 检查点内 assistant text 前缀 + "\n\n以上参数变更尚未生效，请在下方确认后执行，取消可放弃。"；preview 由 Python `_preview` 生成（args 已在响应内，同构 _stage_write）。
+- **包 3 /resume 三路分类（收紧 A5）**：200→透传；404 stash-miss→明确失败降级；500 `{executed:false}`（CONFIGURATION_CHANGED/STATE_FAILED 等执行前失败，T5 证实零执行）→降级；500 `{executed:true}`（exec_write 已执行、终稿轮失败——真实可达）→**不降级**报"写入可能已执行，请检查当前参数"；超时→不执行且**把已弹出的 _pending 放回**（否则重试撞 KeyError，放回后重确认→404→降级，仍以新用户确认为前提）。sidecar exec_write 闭包返回后置 run 级 executed flag 随失败响应携带。backend.resume 返回 tagged（'ok'|'definite'|'timeout'|'maybe_executed'）；**TimeoutError 必须排在 Exception 前**（backend.py 现状吞一切）。
+- **包 4 测试移植**：/tmp 脚本只作参考（绝对路径 import/globalThis 跨 test/绕过 sidecar 层三不可用）；移植进 assistant-sidecar/test/checkpoint.test.ts 沿用 scriptTransport+startShell（加 exec_write 记录器）+createAssistant 注入，单 test 串完整链；**既有"授权拒绝映射 502"测试断言翻转为 blocked 200**（node 侧允许改，Echo 零改动约束仅 pytest）。
+- **包 5 提交序**：①sidecar（stash/blocked 200//resume + node 测试，自洽）②Python（exec_write/透传/双模降级 + pytest）③冒烟记录+归档；每个功能 commit 上 pytest 全量绿。

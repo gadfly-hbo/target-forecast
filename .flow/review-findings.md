@@ -1,13 +1,16 @@
-# REVIEW 发现（Path A 迁移，2026-10-15，fresh-context 子代理×2）
+# REVIEW 发现（(c)-resume，2026-10-16，fresh-context 子代理）
 
-## 首审：FAIL（1 blocking）→ 修复 64ba6dc → 复审：PASS
+## Verdict: **PASS**（0 blocking；4 non-blocking——F2 已修）
 
-- **B1（blocking，已修复）**：PiSidecarBackend.chat 未解析 orchestrated——真实路径落回旧循环：sidecar 已执行的读被再执行、已登记的写被再登记（红队 K3 预警的双登记；确认门未弱化但 _relay_orchestrated 成死码）。修复：完整透传 tool_calls 字段 + orchestrated 解析 + 真 HTTP 解析缝回归测试。复审确认：backend 修复/测试/25 passed/无夹带 全过。
-- **N1（non-blocking，记录不修）**：_relay_orchestrated 只透传 staged[0]——多写 run 的后续 _pending 项不可确认且无 dropped 提示（_stage_write 有）。PRD 单写范围 + 单 pending 确认门设计下可接受；多写支持留后续。
-- **N2（已修）**：README/backend docstring 过期 pi-ai 描述（复审发现 README:69 残留，已补修）。
-- 九项猎杀全净：无 pi-ai 直接 import（lockfile 为传递依赖）、确认门四层核验、五键 limits、140s<150s、启动轮转、凭据未入库、taskId 工具集派生（标准认可）、范围合规、file: 锁定。
+复跑：pytest 241 passed/101.45s 与记录一致；npm test 12/12。真实冒烟由 audit.jsonl 印证：blocked run（0a7b9eb7）无 tool.finished；恢复 run（91d57f1e）写 admitted+finished 于循环内、重放零模型调用、终稿一轮——与提交声明一致。
 
-## 冒烟期现场问题（已修，记录）
+八项猎杀全净：P3 门四路径（exec_write 名门禁+真执行点一次性弹出/不预弹/降级恰一次/maybe 不重执行/超时保留不执行）、A1 覆盖语义、A4 字节一致、A2 blob 无视、Echo 分支行为等同 f9c34bc、无 pi-ai/无凭据泄露、范围合规。**双弹出修复（6d87e4b）判定正确**：executed 后置、各终局分支恰弹一次、超时可重试；残余仅 F1/F3。
 
-- 远古僵尸服务器（13:10 起）占 8399 → 首冒烟工具 404 → 清理后正常；后续注意 kill %1 在新 shell 无效。
-- taskId 未随工具集派生 → 同 store CONFIGURATION_CHANGED → 已按定义摘要派生。
+## Non-blocking 及处置
+
+| # | 发现 | 处置 |
+|---|---|---|
+| F1 | 并发双确认可双执行（get 不预弹；第二确认 404→降级执行）——UI 隐藏确认框缓解+幂等设值写+用户已确认 args，A5 裁定良性 | 记录；如需可加 in-flight 标记（后续） |
+| F2 | 2xx 响应体不可解析→BackendUnavailable→降级执行（与 HTTPError 体的保守 maybe 不一致） | **已修**：归 maybe_executed（21 passed） |
+| F3 | 超时→重确认→404→降级重执行（若超时的恢复服务端实际完成）——GRILL 包 3 显式接受（新确认为前提） | 记录（设计内） |
+| F4 | 冒烟"落盘"文件已按现场恢复清理——audit 仍证明写执行 | 记录（现场恢复是有意为之） |
