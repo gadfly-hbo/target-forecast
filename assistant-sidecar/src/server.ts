@@ -14,14 +14,14 @@
  * （uncapped 五元组）；整 run 唯一界限 = 每请求 AbortSignal(140s < Python 150s)；
  * 同 taskId lease 唯一 → 模块级串行队列；audit JSONL 同步落盘（启动时 >5MiB 轮转）。
  */
-import {createHash} from "node:crypto";
+import {createHash, randomUUID} from "node:crypto";
 import {createServer, type IncomingMessage, type ServerResponse} from "node:http";
 import {appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync} from "node:fs";
 import {join} from "node:path";
 import {pathToFileURL} from "node:url";
 import {createRuntime, createPiTransport} from "pi-agent-runtime";
 import {createFileBudgetStore} from "./budget-store.js";
-import type {AuditSink, JsonValue, ModelConfig, ModelTransport, RunResult, Tool} from "pi-agent-runtime";
+import type {AuditSink, ConversationCheckpoint, JsonValue, ModelConfig, ModelTransport, RunResult, Tool} from "pi-agent-runtime";
 
 const PORT = Number(process.env.WORKBENCH_SIDECAR_PORT ?? 8321);
 const BASE_URL = process.env.WORKBENCH_LLM_BASE_URL ?? "https://token-plan-cn.xiaomimimo.com/v1";
@@ -55,6 +55,36 @@ interface OpenAiTool {
 export interface ToolCallRecord {
   name: string; args: unknown; summary: string;
   stage_pending?: boolean; call_id?: string; preview?: string;
+  /** (c)-resume：blocked 路径的提案已落检查点 stash，确认将走 /resume */
+  checkpoint_staged?: boolean;
+}
+
+interface StashEntry {checkpoint: ConversationCheckpoint; createdAt: number;
+  proposal: {name: string; args: unknown}; tools: OpenAiTool[]; writeActions: string[]}
+
+/** 检查点 stash（A1 覆盖语义）：blocked run 收场时把"最后一条 assistant 有未配对
+ * calls 且无 toolFailed 的 ready 检查点"按新铸 call_id 落表；随进程内存（R7）。 */
+const stash = new Map<string, StashEntry>();
+const STASH_MAX = 8;
+
+interface CheckpointBlob {state?: string; messages?: {role?: string; content?: unknown,
+  calls?: {id?: string; name?: string; arguments?: unknown}[], toolFailed?: boolean,
+  text?: string}[]}
+
+function readyCandidate(blob: CheckpointBlob, writeNames: readonly string[]): {writeCallId: string; name: string; args: unknown; text: string} | null {
+  if (blob.state !== "ready" || !Array.isArray(blob.messages)) return null;
+  const lastA = [...blob.messages].reverse().find((m) => m.role === "assistant");
+  if (!lastA || !Array.isArray(lastA.calls) || lastA.calls.length === 0) return null;
+  const ids = new Set(blob.messages.filter((m) => m.role === "tool").map((m) => (m as {toolId?: string}).toolId));
+  const pending = lastA.calls.filter((c) => !ids.has(c.id ?? ""));
+  if (pending.length === 0) return null;
+  if (blob.messages.some((m) => m.role === "tool" && m.toolFailed)) return null;
+  const write = pending.find((c) => c.name && writeNames.includes(c.name)) ?? pending[0];
+  const text = Array.isArray(lastA.content)
+    ? lastA.content.filter((c): c is {type: "text"; text: string} => (c as {type?: string}).type === "text")
+        .map((c) => c.text).join("")
+    : String(lastA.text ?? "");
+  return {writeCallId: write.id ?? "", name: write.name ?? "", args: write.arguments, text};
 }
 
 /** 拍平：system 首段 + 角色行历史（工具行仅确认路径出现）+ run 内多轮由 SDK 原生承载。 */
@@ -143,36 +173,128 @@ export function createAssistant(deps: AssistantDeps = {}) {
   const budgets = deps.budgets ?? createFileBudgetStore(join(root, "workspace", "assistant", "budget.json"));
   const audit = makeAuditSink(auditFile);
 
-  function runtime() {
+  function runtime(writeGate: boolean) {
     return createRuntime({
       model: modelConfig,
       transport: deps.transport ?? createPiTransport({model: modelConfig, apiKey: API_KEY}),
-      // 授权说明（P3）：run 内效果只有 ①模型外发（用户配 key 即预授权）②读工具本地
-      // 回环（预授权）③写提案登记（良性）。真实写效果永不发生在 run 内——Python
-      // 侧用户确认后才执行；写工具的名门禁在壳端 /stage。
-      authorize: deps.authorize ?? (async () => true),
+      // 授权（P3 + (c)-resume）：读工具/模型外发放行（任务级预授权）；写工具在
+      // /chat 路径一律拒绝（AUTHORITY_REQUIRED → blocked + 'ready' 检查点，效果
+      // 永不发生在未确认 run 内），仅在 /resume（用户已确认）路径放行。
+      authorize: deps.authorize ?? (async (action: {kind?: string; effect?: string}) =>
+        !(writeGate && action.kind === "tool" && action.effect === "write")),
       audit, budgets,
     });
   }
 
-  return async function handleChat(body: {
-    messages?: OpenAiMessage[]; tools?: OpenAiTool[]; write_actions?: string[];
-  }, res: ServerResponse): Promise<void> {
-    if (!API_KEY && !deps.transport) {
-      res.writeHead(503, {"Content-Type": "application/json; charset=utf-8"});
-      res.end(JSON.stringify({error: "sidecar 缺少 WORKBENCH_LLM_API_KEY"}));
+  const LIMITS = {cumulative: "unlimited", maxOutputTokens: 8_192,
+                  modelTimeoutMs: TIMEOUT_MS, toolTimeoutMs: 120_000, controlTimeoutMs: 10_000} as const;
+
+  /** blocked 收场：把 candidate 按新铸 call_id 落 stash（FIFO/2MiB 守卫），返回 pending 条目。 */
+  function stashBlocked(candidate: {checkpoint: ConversationCheckpoint; writeCallId: string; name: string; args: unknown; text: string} | null,
+                        tools: OpenAiTool[], writeActions: string[]): ToolCallRecord | null {
+    if (!candidate) return null;
+    if (Buffer.byteLength(JSON.stringify(candidate.checkpoint)) > 2_097_152) return null;  // R6
+    const callId = randomUUID().replaceAll("-", "").slice(0, 12);
+    if (stash.size >= STASH_MAX) stash.delete(stash.keys().next().value as string);
+    stash.set(callId, {checkpoint: candidate.checkpoint as ConversationCheckpoint, createdAt: Date.now(),
+                       proposal: {name: candidate.name, args: candidate.args},
+                       tools, writeActions});
+    return {name: candidate.name, args: candidate.args, summary: "写提案待确认",
+            stage_pending: true, call_id: callId, checkpoint_staged: true};
+  }
+
+  async function handleResume(body: {call_id?: string}, res: ServerResponse): Promise<void> {
+    const callId = String(body.call_id ?? "");
+    const entry = stash.get(callId);
+    if (!entry) {
+      res.writeHead(404, {"Content-Type": "application/json; charset=utf-8"});
+      res.end(JSON.stringify({error: "提案不存在或已处理", executed: false}));
       return;
     }
+    stash.delete(callId);  // 一次性
+    let executed = false;
     const collect: ToolCallRecord[] = [];
+    // 首个未确认写绑定 exec_write（call_id 一次性在壳端弹出）；其余写良性取消（A3/R5）
+    let writeBound = false;
+    const tools: Tool[] = entry.tools.map((t): Tool => {
+      const name = t.function?.name ?? "";
+      const isWrite = entry.writeActions.includes(name);
+      return {
+        name, description: t.function?.description ?? "",
+        effect: isWrite ? "write" : "read", resourceUnits: 1,
+        parameters: (t.function?.parameters ?? {type: "object", properties: {}}) as Tool["parameters"],
+        execute: async (args: Record<string, unknown>) => {
+          if (!isWrite) {
+            const out = await postJson(`${shellUrl}/api/assistant/exec_read`, {name, args});
+            collect.push({name, args, summary: String(out.summary ?? "")});
+            return (out.result === undefined ? {summary: out.summary}
+                    : {summary: out.summary, result: out.result}) as {[key: string]: JsonValue};
+          }
+          if (!writeBound) {
+            writeBound = true;
+            executed = true;
+            const out = await postJson(`${shellUrl}/api/assistant/exec_write`, {call_id: callId, name, args});
+            collect.push({name, args, summary: String(out.summary ?? "")});
+            return (out.result === undefined ? {summary: out.summary}
+                    : {summary: out.summary, result: out.result}) as {[key: string]: JsonValue};
+          }
+          collect.push({name, args, summary: "已取消（另有写提案请逐个确认）"});
+          return {summary: "已取消（请逐个确认）"} as {[key: string]: JsonValue};
+        },
+      };
+    });
     try {
-      const result: RunResult<string> = await enqueue(() => runtime().runAgent({
-        taskId: taskIdFor(body.tools ?? [], body.write_actions ?? []),
-        prompt: flatten(body.messages ?? []),
-        tools: toSdkTools(body.tools ?? [], body.write_actions ?? [], shellUrl, collect),
-        limits: {cumulative: "unlimited", maxOutputTokens: 8_192,
-                 modelTimeoutMs: TIMEOUT_MS, toolTimeoutMs: 120_000, controlTimeoutMs: 10_000},
+      const result: RunResult<string> = await enqueue(() => runtime(false).runAgent({
+        taskId: taskIdFor(entry.tools, entry.writeActions),  // A4：与 /chat 同派生
+        prompt: "", checkpoint: entry.checkpoint,            // R1：恢复必空串
+        tools, limits: LIMITS,
+        saveCheckpoint: async (cp: unknown) => { void cp; },  // R2：恢复路径检查点不再使用
         signal: AbortSignal.timeout(RUN_SIGNAL_MS),
       }));
+      if (result.status !== "succeeded") {
+        res.writeHead(500, {"Content-Type": "application/json; charset=utf-8"});
+        res.end(JSON.stringify({error: `恢复未成功：${result.status}/${result.reason}`, executed}));
+        return;
+      }
+      res.writeHead(200, {"Content-Type": "application/json; charset=utf-8"});
+      res.end(JSON.stringify({reply: (result.value ?? "").trim(), tool_calls: collect, orchestrated: true}));
+    } catch (err) {
+      res.writeHead(500, {"Content-Type": "application/json; charset=utf-8"});
+      res.end(JSON.stringify({error: `恢复异常：${String(err).slice(0, 300)}`, executed}));
+    }
+  }
+
+  async function chatImpl(body: {
+    messages?: OpenAiMessage[]; tools?: OpenAiTool[]; write_actions?: string[];
+  }, res: ServerResponse): Promise<void> {
+    const collect: ToolCallRecord[] = [];
+    const tools = body.tools ?? [];
+    const writeActions = body.write_actions ?? [];
+    // A1 覆盖语义：单一 candidate，收到合格 ready 即覆盖；tool-admitted/toolFailed 跳过
+    let candidate: {checkpoint: ConversationCheckpoint; writeCallId: string; name: string; args: unknown; text: string} | null = null;
+    try {
+      const result: RunResult<string> = await enqueue(() => runtime(true).runAgent({
+        taskId: taskIdFor(tools, writeActions),
+        prompt: flatten(body.messages ?? []),
+        tools: toSdkTools(tools, writeActions, shellUrl, collect),
+        limits: LIMITS,
+        ...(writeActions.length ? {saveCheckpoint: async (cp: unknown) => {
+          const hit = readyCandidate(cp as CheckpointBlob, writeActions);
+          if (hit) candidate = {checkpoint: structuredClone(cp) as ConversationCheckpoint, ...hit};
+        }} : {}),
+        signal: AbortSignal.timeout(RUN_SIGNAL_MS),
+      }));
+      if (result.status === "blocked" && result.reason === "AUTHORITY_REQUIRED") {
+        const found = candidate as {checkpoint: ConversationCheckpoint; writeCallId: string; name: string; args: unknown; text: string} | null;  // 闭包写入，TS 不追踪窄化
+        const pendingTc = stashBlocked(found, tools, writeActions);
+        const reply = (found?.text ? found.text + "\n\n" : "")
+          + (pendingTc ? "以上参数变更尚未生效，请在下方确认后执行，取消可放弃。"
+                       : "该操作需要确认，但提案登记失败，请重试。");
+        res.writeHead(200, {"Content-Type": "application/json; charset=utf-8"});
+        res.end(JSON.stringify({reply, tool_calls: pendingTc ? [pendingTc] : collect,
+                                orchestrated: true, blocked: true}));
+        return;
+      }
       if (result.status !== "succeeded") {
         res.writeHead(502, {"Content-Type": "application/json; charset=utf-8"});
         res.end(JSON.stringify({error: `模型编排未成功：${result.status}/${result.reason}`}));
@@ -185,6 +307,16 @@ export function createAssistant(deps: AssistantDeps = {}) {
       res.end(JSON.stringify({error: `模型调用异常：${String(err).slice(0, 300)}`}));
     }
   };
+  return Object.assign(async function handleChat(body: {
+    messages?: OpenAiMessage[]; tools?: OpenAiTool[]; write_actions?: string[];
+  }, res: ServerResponse): Promise<void> {
+    if (!API_KEY && !deps.transport) {
+      res.writeHead(503, {"Content-Type": "application/json; charset=utf-8"});
+      res.end(JSON.stringify({error: "sidecar 缺少 WORKBENCH_LLM_API_KEY"}));
+      return;
+    }
+    await chatImpl(body, res);
+  }, {resume: handleResume});
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -203,6 +335,15 @@ const server = createServer(async (req, res) => {
     res.writeHead(200);
     res.end(JSON.stringify({ok: true, model: MODEL_ID, provider: PROVIDER, baseUrl: BASE_URL,
                             sdk: "pi-agent-runtime@0.4.3"}));
+    return;
+  }
+  if (req.method === "POST" && req.url === "/resume") {
+    try {
+      await handleChat.resume(JSON.parse(await readBody(req) || "{}"), res);
+    } catch (err) {
+      res.writeHead(400);
+      res.end(JSON.stringify({error: `请求不合法：${String(err).slice(0, 200)}`}));
+    }
     return;
   }
   if (req.method === "POST" && req.url === "/chat") {

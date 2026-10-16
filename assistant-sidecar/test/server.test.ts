@@ -84,24 +84,26 @@ test("读工具经 exec_read 代理并回传摘要", async () => {
   } finally {shell.server.close();}
 });
 
-test("写工具只登记 pending，不经 exec_read 执行", async () => {
+test("写提案 → blocked 200 + 检查点 stash（不经 stage/exec_read）", async () => {
   const shell = await startShell();
   try {
     const transport = scriptTransport([
       {content: [{kind: "tool", id: "c1", name: "roi__set_plan_params",
                   arguments: {plan: "计划1", params: {cvr: 0.05}}}], stop: "tools",
        usage: {inputTokens: 1, outputTokens: 2}},
-      {content: [{kind: "text", text: "已登记，请确认"}], stop: "complete", usage: {inputTokens: 1, outputTokens: 1}},
     ]);
     const out = await run({transport, shellUrl: shell.url}, {
       messages: [{role: "user", content: "调参数"}], tools: TOOLS, write_actions: ["roi__set_plan_params"]});
     assert.equal(out.status, 200);
+    assert.equal(out.json.blocked, true);
+    assert.equal(out.json.orchestrated, true);
     const tc = out.json.tool_calls[0];
     assert.equal(tc.stage_pending, true);
-    assert.equal(tc.call_id, "cid-1");
-    assert.ok(tc.summary.includes("登记"));
-    assert.equal(shell.stages.length, 1);
-    assert.equal(shell.reads.length, 0); // 写不经读执行器（名门禁在壳端，此处验证路由）
+    assert.equal(tc.checkpoint_staged, true);
+    assert.match(String(tc.call_id), /^[0-9a-f]{12}$/);
+    assert.ok(String(out.json.reply).includes("尚未生效"));
+    assert.equal(shell.stages.length, 0);   // 检查点路径不再调 /stage
+    assert.equal(shell.reads.length, 0);
   } finally {shell.server.close();}
 });
 
@@ -113,7 +115,7 @@ test("模型失败映射 502", async () => {
   assert.ok(String(out.json.error).length > 0);
 });
 
-test("授权拒绝映射 502（blocked 无文本载荷）", async () => {
+test("全量授权拒绝（无候选检查点）→ blocked 200 + 登记失败提示", async () => {
   const shell = await startShell();
   try {
     const transport = scriptTransport([
@@ -121,8 +123,9 @@ test("授权拒绝映射 502（blocked 无文本载荷）", async () => {
     ]);
     const out = await run({transport, shellUrl: shell.url, authorize: async () => false}, {
       messages: [{role: "user", content: "hi"}], tools: [], write_actions: []});
-    assert.equal(out.status, 502);
-    assert.match(String(out.json.error), /blocked|AUTHORITY/);
+    assert.equal(out.status, 200);
+    assert.equal(out.json.blocked, true);
+    assert.match(String(out.json.reply), /登记失败|尚未生效/);
   } finally {shell.server.close();}
 });
 
