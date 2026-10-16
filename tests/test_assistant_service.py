@@ -450,6 +450,6 @@ def test_confirm_via_resume_timeout_puts_back_and_skips():
 
     svc.backend = B()
     res = svc._confirm("cp4")
-    assert "恢复超时" in res["reply"] and "未执行" in res["reply"]
+    assert "恢复超时" in res["reply"] and "状态未知" in res["reply"]
     assert len(http.calls) == calls_before            # 不执行
-    assert svc._pending["cp4"]["checkpoint_key"] == "cp4"  # 放回，可重试
+    assert svc._pending["cp4"]["checkpoint_key"] == "cp4"  # 未弹出，可再确认重试

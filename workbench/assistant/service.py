@@ -152,10 +152,15 @@ class AssistantService:
         }
 
     def _confirm(self, call_id: str) -> dict:
-        tc = self._pending.pop(call_id)  # 一次性；重复确认 KeyError
+        tc = self._pending.get(call_id)
+        if tc is None:
+            raise KeyError(call_id)
         key = tc.get("checkpoint_key")
         if key and isinstance(self.backend, PiSidecarBackend):
+            # (c)-resume：不预弹——call_id 一次性在 exec_write（真实执行点）弹出；
+            # 降级/maybe 分支在此各自处理
             return self._confirm_via_resume(call_id, tc, key)
+        self._pending.pop(call_id)  # 一次性；重复确认 KeyError
         summary = self._execute(tc)
         messages = [
             {"role": "system", "content": "用户已确认参数变更，请简述结果。"},
@@ -191,13 +196,15 @@ class AssistantService:
         try:
             out = self.backend.resume(key)
         except _ResumeTimeout as exc:
-            self._pending[call_id] = tc  # 放回：重试承诺成立（重试将 404→降级，仍需用户再确认）
-            return {"reply": f"恢复超时（{exc}），未执行写入。请再次点击确认重试。",
+            # 超时：执行状态未知——条目保留（未弹出），用户可再确认重试；
+            # 重试将命中 stash 已弹 → 404 → 明确失败 → 降级执行（仍以新确认为前提）
+            return {"reply": f"恢复超时（{exc}），写入状态未知。请检查参数后再次确认。",
                     "tool_calls": [], "pending_confirmation": None}
         except BackendUnavailable as exc:
-            out = None  # 明确失败：连接拒绝/非 2xx
+            out = None  # 明确失败：连接拒绝/404/executed:false（sidecar 未执行）
             self._last_resume_error = str(exc)
         if out is None:
+            self._pending.pop(call_id, None)
             summary = self._execute(tc)  # 降级：现行路径（效果恰一次——sidecar 未执行）
             messages = [
                 {"role": "system", "content": "用户已确认参数变更，请简述结果。"},
@@ -208,6 +215,7 @@ class AssistantService:
             return {"reply": final.reply or summary, "tool_calls": [{**tc, "summary": summary}],
                     "pending_confirmation": None}
         kind, body = out
+        self._pending.pop(call_id, None)  # 恢复已收场：清条目（exec_write 已弹或状态未知）
         if kind == "maybe_executed":
             return {"reply": "写入可能已执行（恢复中断），请检查当前参数后决定是否重试。",
                     "tool_calls": [{**tc, "summary": "执行状态未知，请人工核对"}],

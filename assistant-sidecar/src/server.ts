@@ -232,8 +232,8 @@ export function createAssistant(deps: AssistantDeps = {}) {
           }
           if (!writeBound) {
             writeBound = true;
-            executed = true;
             const out = await postJson(`${shellUrl}/api/assistant/exec_write`, {call_id: callId, name, args});
+            executed = true;  // 置位于执行成功后（exec_write 失败 = 未执行，Python 可降级）
             collect.push({name, args, summary: String(out.summary ?? "")});
             return (out.result === undefined ? {summary: out.summary}
                     : {summary: out.summary, result: out.result}) as {[key: string]: JsonValue};
