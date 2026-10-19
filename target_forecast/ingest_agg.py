@@ -32,6 +32,11 @@ def _norm_month(v) -> str:
 
 def load_agg(path, platform: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=0)
+    return validate_agg_frame(df, platform)
+
+
+def validate_agg_frame(df: pd.DataFrame, platform: str) -> pd.DataFrame:
+    """聚合指标 DataFrame 级校验（文件/上传共用）。业务 blocker 定位到行（Excel 行号=索引+2）。"""
     missing = [c for c in AGG_REQUIRED if c not in df.columns]
     if missing:
         raise ValueError(f"[{platform}] 聚合指标表缺少必填字段: {missing}")
@@ -39,6 +44,22 @@ def load_agg(path, platform: str) -> pd.DataFrame:
     for c in ["新客数", "新客客单", "老客数", "老客复购频次", "老客客单", "UV", "新客订单数", "转化率", "GMV"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+    # 重复月份：一行=一个平台一个月
+    dup = df[df["月份"].duplicated(keep=False)]
+    if not dup.empty:
+        first = dup.iloc[0]
+        rows = [int(i) + 2 for i in dup.index[dup["月份"] == first["月份"]]]
+        raise ValueError(f"[{platform}] 月份 {first['月份']} 重复出现（第 {('、').join(map(str, rows))} 行），"
+                         "请先消除重复月份")
+    # 必填数值列空值/非有限数
+    for c in AGG_REQUIRED[1:]:
+        bad = df[c].isna() | ~np.isfinite(df[c])
+        if bad.any():
+            rows = [int(i) + 2 for i in df.index[bad][:5]]
+            raise ValueError(f"[{platform}] 「{c}」存在空值/非法数值（第 {('、').join(map(str, rows))} 行）")
+    derived = df["新客数"] * df["新客客单"] + df["老客数"] * df["老客复购频次"] * df["老客客单"]
+    if float(derived.sum()) <= 0:
+        raise ValueError(f"[{platform}] 派生 GMV 合计为 0，没有可测算的业务量")
     return df.sort_values("月份").reset_index(drop=True)
 
 

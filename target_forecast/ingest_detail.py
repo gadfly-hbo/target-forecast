@@ -16,16 +16,37 @@ from .schema import DETAIL_REQUIRED, UNIFIED_COLUMNS
 def load_detail(path, platform: str) -> pd.DataFrame:
     """读取并校验通用订单明细表，附加 month 列。"""
     df = pd.read_excel(path, sheet_name=0, dtype={"订单号": str, "用户ID": str, "商品ID": str})
+    return validate_detail_frame(df, platform)
+
+
+def validate_detail_frame(df: pd.DataFrame, platform: str) -> pd.DataFrame:
+    """订单明细 DataFrame 级校验（文件/上传共用）。业务 blocker 定位到行（Excel 行号=索引+2）。
+
+    口径（G7）：实付金额=支付净额（已扣退款），本工具不做退款抵减；非正金额行一律拒绝。
+    """
     missing = [c for c in DETAIL_REQUIRED if c not in df.columns]
     if missing:
         raise ValueError(f"[{platform}] 订单明细缺少必填字段: {missing}")
     df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
     if df["日期"].isna().any():
-        raise ValueError(f"[{platform}] 「日期」列存在无法解析的值，请检查格式")
+        rows = [int(i) + 2 for i in df.index[df["日期"].isna()][:5]]
+        raise ValueError(f"[{platform}] 「日期」列存在无法解析的值（第 {('、').join(map(str, rows))} 行），请检查格式")
     df["实付金额"] = pd.to_numeric(df["实付金额"], errors="coerce")
     bad = df["实付金额"].isna() | (df["实付金额"] <= 0)
     if bad.any():
-        raise ValueError(f"[{platform}] 「实付金额」存在空值/非正值共 {int(bad.sum())} 行，请先清洗")
+        rows = [int(i) + 2 for i in df.index[bad][:5]]
+        raise ValueError(
+            f"[{platform}] 「实付金额」存在空值/非正值（第 {('、').join(map(str, rows))} 行，共 {int(bad.sum())} 行）。"
+            "口径：实付金额=支付净额（已扣退款），本工具不做退款抵减；请按净额口径导出或剔除退款行")
+    # 订单身份一致性：同一订单号不能属于不同用户
+    dup_uid = df.groupby("订单号")["用户ID"].nunique()
+    if (dup_uid > 1).any():
+        bad_ids = list(dup_uid.index[dup_uid > 1][:5])
+        rows = [int(i) + 2 for i in df.index[df["订单号"].isin(bad_ids)][:5]]
+        raise ValueError(f"[{platform}] 同一订单号对应多个用户（订单号 {('、').join(map(str, bad_ids))}，"
+                         f"如第 {('、').join(map(str, rows))} 行），请先核对订单身份")
+    if float(df["实付金额"].sum()) <= 0:
+        raise ValueError(f"[{platform}] 实付金额合计为 0 或负值，没有可测算的业务量")
     for col, default in (("品类", "未分类"), ("件数", 1), ("原价金额", np.nan)):
         if col not in df.columns:
             df[col] = default
@@ -95,7 +116,8 @@ def _assign_tiers(core: pd.DataFrame, pareto_pct: float, tail_pct: float) -> pd.
             tiers[i] = "尾部"
         else:
             break
-    return pd.Series(tiers, index=order.index)
+    # 返回前按入参行序对齐——调用方即使用 .values 也不会错位（梯队只由 GMV 决定）
+    return pd.Series(tiers, index=order.index).reindex(core.index)
 
 
 def goods_structure(lines: pd.DataFrame, caliber: dict, history_end: pd.Timestamp) -> pd.DataFrame:
@@ -120,9 +142,9 @@ def goods_structure(lines: pd.DataFrame, caliber: dict, history_end: pd.Timestam
         core = core.copy()
         if caliber["tier_scope"] == "category":
             for _, g in core.groupby("品类"):
-                core.loc[g.index, "梯队"] = _assign_tiers(g, caliber["tier_pareto_pct"], caliber["tier_tail_pct"]).values
+                core.loc[g.index, "梯队"] = _assign_tiers(g, caliber["tier_pareto_pct"], caliber["tier_tail_pct"])
         else:
-            core["梯队"] = _assign_tiers(core, caliber["tier_pareto_pct"], caliber["tier_tail_pct"]).values
+            core["梯队"] = _assign_tiers(core, caliber["tier_pareto_pct"], caliber["tier_tail_pct"])
         sku.loc[core.index, "梯队"] = core["梯队"]
 
     struct = (sku.groupby(["品类", "梯队"], as_index=False)

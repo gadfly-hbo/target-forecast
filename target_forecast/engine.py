@@ -13,6 +13,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# 引擎版本：测算逻辑变化时递增；运行记录携带，引擎变化后显式重跑 = 新输入身份
+# 1.1 = 阶段A 六项修正（无UV缺列/梯队索引/短历史年化/A-B冲突/同视角分母/目标期对齐）
+ENGINE_VERSION = "forecast-engine-1.1"
+
 
 def season_shares(monthly: pd.DataFrame) -> pd.Series:
     """历史GMV的月度季节占比（1-12月，合计=1）。
@@ -35,6 +39,7 @@ def baseline(monthly: pd.DataFrame, months: int) -> dict:
     def _safe(num, den):
         return float(num) / float(den) if den else 0.0
 
+    months_present = int(len(win))
     b = {
         "new_customers": float(win["new_customers"].mean()),
         "new_arpu": _safe(win["new_gmv"].sum(), win["new_customers"].sum()),
@@ -43,7 +48,10 @@ def baseline(monthly: pd.DataFrame, months: int) -> dict:
         "old_freq": _safe(win["old_orders"].sum(), win["old_customers"].sum()),
         "old_aov": _safe(win["old_gmv"].sum(), win["old_orders"].sum()),
         "aov_total": _safe(win["gmv"].sum(), win["orders"].sum()),
-        "annual_gmv": float(win["gmv"].sum()),
+        # 基期年化 GMV：月均 × 12。窗口恰为 12 个月时与求和恒等；短历史不再低估、长窗口不再翻倍。
+        "annual_gmv": (float(win["gmv"].mean()) * 12) if months_present else 0.0,
+        "coverage_months": months_present,
+        "annualized": months_present != 12,
     }
     if win["uv"].notna().any() and win["uv"].sum() > 0:
         b["uv"] = float(win["uv"].mean())
@@ -115,12 +123,17 @@ def project_goods(structure: pd.DataFrame, params: dict, target_months, shares: 
 
 
 def run(monthly: pd.DataFrame, structure: pd.DataFrame | None, scenarios: dict,
-        caliber: dict) -> dict:
-    """单平台测算入口。返回 {baseline, person, field, goods, main_view, target_months}。"""
+        caliber: dict, target_months=None) -> dict:
+    """单平台测算入口。返回 {baseline, person, field, goods, main_view, target_months}。
+
+    target_months 缺省时按本平台历史末月推导（向后兼容）；
+    pipeline.run_engine 会传入全平台共同目标期（共同基期末月之后 N 个月）。
+    """
     n_months = caliber.get("target_months", 12)
     base = baseline(monthly, caliber["baseline_months"])
     shares = season_shares(monthly)
-    target_months = _target_month_labels(monthly, n_months)
+    if target_months is None:
+        target_months = _target_month_labels(monthly, n_months)
 
     person_parts, field_parts, goods_parts = [], [], []
     for name, p in scenarios.items():
