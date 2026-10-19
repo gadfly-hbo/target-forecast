@@ -16,7 +16,8 @@
  */
 import {createHash, randomUUID} from "node:crypto";
 import {createServer, type IncomingMessage, type ServerResponse} from "node:http";
-import {appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync} from "node:fs";
+import {appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync} from "node:fs";
+import {createRequire} from "node:module";
 import {join} from "node:path";
 import {pathToFileURL} from "node:url";
 import {createRuntime, createPiTransport} from "pi-agent-runtime";
@@ -28,6 +29,22 @@ const BASE_URL = process.env.WORKBENCH_LLM_BASE_URL ?? "https://token-plan-cn.xi
 const API_KEY = process.env.WORKBENCH_LLM_API_KEY ?? "";
 const MODEL_ID = process.env.WORKBENCH_LLM_MODEL ?? "mimo-v2.6-pro";
 const PROVIDER = "xiaomi-mimo";
+
+// SDK 版本动态读取真实安装（禁止硬编码——此前 /health 写死 0.4.3 与实装 0.5.3-harness.3 不符）
+const require_ = createRequire(import.meta.url);
+function sdkVersion(): string {
+  try {
+    const entry = require_.resolve("pi-agent-runtime"); // …/dist/index.js
+    const pkg = JSON.parse(readFileSync(join(entry, "..", "..", "package.json"), "utf8"));
+    return `pi-agent-runtime@${pkg.version ?? "unknown"}`;
+  } catch {
+    return "pi-agent-runtime@unknown";
+  }
+}
+export const SDK_VERSION = sdkVersion();
+export function healthPayload(): Record<string, unknown> {
+  return {ok: true, model: MODEL_ID, provider: PROVIDER, baseUrl: BASE_URL, sdk: SDK_VERSION};
+}
 const TIMEOUT_MS = Number(process.env.WORKBENCH_LLM_TIMEOUT_MS ?? 120_000);
 const RUN_SIGNAL_MS = 140_000; // 必须 < Python PiSidecarBackend 150s socket 超时
 // 稳定任务 ID（标准：不可每请求随机）——工具定义参与 config hash，故按
@@ -333,8 +350,7 @@ const server = createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200);
-    res.end(JSON.stringify({ok: true, model: MODEL_ID, provider: PROVIDER, baseUrl: BASE_URL,
-                            sdk: "pi-agent-runtime@0.4.3"}));
+    res.end(JSON.stringify(healthPayload()));
     return;
   }
   if (req.method === "POST" && req.url === "/resume") {

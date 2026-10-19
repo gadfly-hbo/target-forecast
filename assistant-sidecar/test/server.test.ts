@@ -166,3 +166,17 @@ test("持久预算账本：跨实例累计计量与配置身份", async () => {
   await assert.rejects(() => B.claimUncapped("t1", "run-3", "cfg-2", limits),
                        (e: Error & {reason?: string}) => e.reason === "CONFIGURATION_CHANGED");
 });
+
+test("health 契约：sdk 版本动态读取真实安装（不再硬编码 0.4.3）", async () => {
+  const {healthPayload} = await import("../dist/server.js");
+  const {readFileSync} = await import("node:fs");
+  const {fileURLToPath} = await import("node:url");
+  const pkgPath = join(fileURLToPath(new URL(".", import.meta.url)), "..",
+                       "node_modules", "pi-agent-runtime", "package.json");
+  const installed = JSON.parse(readFileSync(pkgPath, "utf8"));
+  const payload = healthPayload() as {ok: boolean; sdk: string; model: string};
+  assert.equal(payload.ok, true);
+  assert.equal(payload.sdk, `pi-agent-runtime@${installed.version}`);
+  assert.notEqual(payload.sdk, "pi-agent-runtime@0.4.3");
+  assert.match(payload.model, /.+/);
+});
