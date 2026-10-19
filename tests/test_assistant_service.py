@@ -19,16 +19,28 @@ ROI_CALC_RESULT = {
                  "totals": {"spend": 145000, "gmv": 643807.59, "net": 50807.59}}
     }
 }
-FORECAST_STATE = {
-    "demo_used": False,
-    "platforms": {"天猫": {"mode": "A"}, "私域": {"mode": "B"}},
-    "scenarios": {
-        "保守": {"new_customers_growth": 0.03},
-        "基准": {"new_customers_growth": 0.10},
-        "挑战": {"new_customers_growth": 0.10},
-    },
+FORECAST_STATE = {"engine_version": "forecast-engine-1.1",
+                  "plans": [{"plan_id": "plan-1"}, {"plan_id": "plan-2"}],
+                  "runs": [{"run_id": "RUN-001"}]}
+FORECAST_PLAN_DETAIL = {
+    "draft": {"plan_id": "plan-1", "revision": 3,
+              "goal": {"value": 12800000, "unit": "元"}},
+    "confirmation_status": {"data_coverage": {"confirmed": True, "stale": False},
+                            "caliber": {"confirmed": True, "stale": False},
+                            "assumptions": {"confirmed": False, "stale": False}},
+    "snapshot": {"synthetic": True,
+                 "quality": {"blockers": [], "confirmable": [{"detail": "私域缺 2 个月"}], "warnings": []}},
+    "runs": [{"run_id": "RUN-001", "selected": "基准", "saved": "2026-10-19T10:00:00+08:00",
+              "engine_version": "forecast-engine-1.1",
+              "summary": {"selected_total": 13815000.0}},
+             {"run_id": "RUN-002", "selected": "挑战", "saved": "2026-10-19T11:00:00+08:00",
+              "engine_version": "forecast-engine-1.1",
+              "summary": {"selected_total": 14761000.0}}],
 }
-FORECAST_CALC = {"consolidated": [{"scenario": "挑战", "GMV_主口径": 123456.0}]}
+FORECAST_PROPOSAL = {"proposal_id": "prop-1", "scenario": "基准", "status": "pending",
+                     "patches": [{"param": "new_customers_growth", "old": 0.1, "new": 0.2}]}
+FORECAST_APPLY = {"draft": {"plan_id": "plan-1", "revision": 4},
+                  "proposal": {"proposal_id": "prop-1", "scenario": "基准", "status": "applied"}}
 
 
 ROI_STATE = {"plans": [{"name": f"计划{i}"} for i in range(1, 5)],
@@ -45,12 +57,18 @@ class FakeHttp:
             return ROI_CALC_RESULT
         if path == "/t/roi/api/state":
             return ROI_STATE
-        if path == "/t/forecast/api/state":
+        if path == "/t/forecast/api/v2/state":
             return FORECAST_STATE
-        if path == "/t/forecast/api/calc":
-            return FORECAST_CALC
-        if path == "/t/forecast/api/assistant_params":
-            return {"saved": True}
+        if path == "/t/forecast/api/v2/plans/plan-1":
+            return FORECAST_PLAN_DETAIL
+        if path == "/t/forecast/api/v2/plans/plan-1/proposals":
+            return FORECAST_PROPOSAL
+        if path == "/t/forecast/api/v2/plans/plan-1/proposals/prop-1/apply":
+            return FORECAST_APPLY
+        if path == "/t/forecast/api/v2/plans/plan-1/runs/RUN-001":
+            return {"run": FORECAST_PLAN_DETAIL["runs"][0], "result": {}}
+        if path == "/t/forecast/api/v2/plans/plan-1/runs/RUN-002":
+            return {"run": FORECAST_PLAN_DETAIL["runs"][1], "result": {}}
         if path == "/t/roi/api/assistant_params":
             return {"saved": True}
         raise AssertionError(f"未预期的调用: {method} {path}")
@@ -76,28 +94,28 @@ def test_read_intent_tool_result_in_reply():
 
 def test_write_intent_requires_confirmation_no_side_effect():
     svc, http, _ = _service()
-    res = svc.chat({"message": "把挑战情景新客增速调到 25%", "history": [], "tool_id": "forecast"})
+    res = svc.chat({"message": "把计划1的cvr调计划到 5%", "history": [], "tool_id": "roi"})
     pending = res["pending_confirmation"]
     assert pending is not None
-    assert pending["action"] == "forecast__set_scenario_params"
-    assert pending["args"] == {"scenario": "挑战", "params": {"new_customers_growth": 0.25}}
-    # 预览含旧值与新值
-    assert "new_customers_growth" in pending["preview"] and "0.25" in pending["preview"]
-    # 确认前零写副作用（只允许只读的 GET state 取预览旧值）
+    assert pending["action"] == "roi__set_plan_params"
+    assert pending["args"] == {"plan": "计划1", "params": {"cvr": 0.05}}
+    # 预览含计划与参数
+    assert "计划1" in pending["preview"] and "cvr" in pending["preview"]
+    # 确认前零写副作用
     assert not any(m == "POST" and p.endswith("assistant_params") for m, p, _ in http.calls)
 
 
 def test_confirm_executes_write_once():
     svc, http, _ = _service()
-    res = svc.chat({"message": "把挑战情景新客增速调到 25%", "history": [], "tool_id": "forecast"})
+    res = svc.chat({"message": "把计划1的cvr调计划到 5%", "history": [], "tool_id": "roi"})
     call_id = res["pending_confirmation"]["call_id"]
-    res2 = svc.chat({"confirm": call_id, "tool_id": "forecast"})
+    res2 = svc.chat({"confirm": call_id, "tool_id": "roi"})
     posts = [b for m, p, b in http.calls if m == "POST" and p.endswith("assistant_params")]
-    assert len(posts) == 1 and posts[0] == {"scenarios": {"挑战": {"new_customers_growth": 0.25}}}
-    assert "已应用" in res2["reply"] and "123456" in res2["reply"]
+    assert len(posts) == 1 and posts[0] == {"plans": {"计划1": {"cvr": 0.05}}}
+    assert "已应用" in res2["reply"] and "1000" in res2["reply"]
     # call_id 一次性：重复确认必须失败
     try:
-        svc.chat({"confirm": call_id, "tool_id": "forecast"})
+        svc.chat({"confirm": call_id, "tool_id": "roi"})
         raise AssertionError("重复确认未被拒绝")
     except KeyError:
         pass
@@ -128,14 +146,14 @@ def test_co_round_read_executes_before_write_staging():
     fixtures = [
         {"match": "一起看", "reply": "",
          "tool_calls": [{"name": "roi__calc", "args": {}},
-                        {"name": "forecast__set_scenario_params",
-                         "args": {"scenario": "挑战", "params": {"new_customers_growth": 0.25}}}]},
+                        {"name": "roi__set_plan_params",
+                         "args": {"plan": "计划1", "params": {"cvr": 0.05}}}]},
     ]
     http = FakeHttp()
     svc = AssistantService(build_default_registry(ROOT), EchoBackend(fixtures), http)
-    res = svc.chat({"message": "帮我一起看", "history": [], "tool_id": "forecast"})
+    res = svc.chat({"message": "帮我一起看", "history": [], "tool_id": "roi"})
     pending = res["pending_confirmation"]
-    assert pending and pending["action"] == "forecast__set_scenario_params"
+    assert pending and pending["action"] == "roi__set_plan_params"
     assert any(m == "POST" and p == "/t/roi/api/calc" for m, p, _ in http.calls)  # 只读先执行
     assert not any(p.endswith("assistant_params") for _, p, _ in http.calls)      # 写未执行
     assert "顺带完成只读查询" in res["reply"]
@@ -222,11 +240,19 @@ class FakeHttp3(FakeHttp):
             return ROI_CALC_RESULT
         if path == "/t/roi/api/state":
             return ROI_STATE
-        if path == "/t/forecast/api/state":
+        if path == "/t/forecast/api/v2/state":
             return FORECAST_STATE
-        if path == "/t/forecast/api/calc":
-            return FORECAST_CALC
-        if path in ("/t/forecast/api/assistant_params", "/t/roi/api/assistant_params"):
+        if path == "/t/forecast/api/v2/plans/plan-1":
+            return FORECAST_PLAN_DETAIL
+        if path == "/t/forecast/api/v2/plans/plan-1/proposals":
+            return FORECAST_PROPOSAL
+        if path == "/t/forecast/api/v2/plans/plan-1/proposals/prop-1/apply":
+            return FORECAST_APPLY
+        if path == "/t/forecast/api/v2/plans/plan-1/runs/RUN-001":
+            return {"run": FORECAST_PLAN_DETAIL["runs"][0], "result": {}}
+        if path == "/t/forecast/api/v2/plans/plan-1/runs/RUN-002":
+            return {"run": FORECAST_PLAN_DETAIL["runs"][1], "result": {}}
+        if path == "/t/roi/api/assistant_params":
             return {"saved": True}
         raise AssertionError(f"未预期的调用: {method} {path}")
 
@@ -239,19 +265,70 @@ def _svc3():
 
 def test_get_state_branch_all_tools():
     svc, http = _svc3()
-    assert svc._execute({"name": "forecast__get_state", "args": {}}) == "目标测算：2 平台（明细1/聚合1），正式数据"
     assert svc._execute({"name": "coupon__get_state", "args": {}}) == "优惠券：1 个场景，2 个封存运行"
     assert svc._execute({"name": "roi__get_state", "args": {}}) == "投放 ROI：4 个演示计划（合成假设）"
-    assert [p for m, p, _ in http.calls] == ["/t/forecast/api/state", "/t/coupon/api/state",
-                                             "/t/roi/api/state"]
+    assert [p for m, p, _ in http.calls] == ["/t/coupon/api/state", "/t/roi/api/state"]
 
 
-def test_forecast_calc_branch():
+def test_forecast_get_plan_state_branch():
+    """forecast 专用读动作：修订/目标/数据质量/确认/最近运行摘要（不含原始订单）。"""
     svc, http = _svc3()
-    reply = svc._execute({"name": "forecast__calc", "args": {}})
-    assert reply == "全渠道年化GMV（按情景）：挑战 123456 元"
-    posts = [b for m, p, b in http.calls if m == "POST" and p == "/t/forecast/api/calc"]
-    assert posts == [{"scenarios": {}}]
+    reply = svc._execute({"name": "forecast__get_plan_state", "args": {"plan_id": "plan-1"}})
+    assert "r3" in reply and "12,800,000 元" in reply and "合成演示数据" in reply
+    assert "已确认[数据覆盖、口径]" in reply and "质量待确认 1 项" in reply and "RUN-001" in reply
+    assert [p for m, p, _ in http.calls] == ["/t/forecast/api/v2/plans/plan-1"]
+
+
+def test_forecast_compare_runs_branch():
+    svc, http = _svc3()
+    reply = svc._execute({"name": "forecast__compare_runs",
+                          "args": {"plan_id": "plan-1", "run_ids": ["RUN-001", "RUN-002"]}})
+    assert "RUN-001（基准 13815000 元）" in reply and "RUN-002（挑战 14761000 元）" in reply
+
+
+def test_forecast_apply_proposal_branch_write():
+    """唯一写动作：经确认门执行，落工作稿（假回环返回 r4），摘要如实。"""
+    svc, http = _svc3()
+    out = svc.stage("forecast__apply_proposal", {"plan_id": "plan-1", "proposal_id": "prop-1"})
+    assert "采纳提案" in out["preview"] and "已有运行不变" in out["preview"]
+    res = svc.chat({"confirm": out["call_id"], "tool_id": "forecast"})
+    assert "已采纳提案 prop-1（基准情景）" in res["reply"] and "r4" in res["reply"]
+    posts = [p for m, p, _ in http.calls if m == "POST"]
+    assert "/t/forecast/api/v2/plans/plan-1/proposals/prop-1/apply" in posts
+
+
+def test_missing_executor_raises_no_fake_success():
+    """不假成功：声明动作缺执行器必须 raise（不再返回'已执行'）。"""
+    svc, _ = _svc3()
+    svc._by_name["forecast__ghost"] = {"x-tool": "forecast", "x-action": "ghost", "x-write": False}
+    try:
+        svc._execute({"name": "forecast__ghost", "args": {}})
+        raise AssertionError("缺执行器未被拒绝")
+    except ValueError as e:
+        assert "拒绝假成功" in str(e)
+
+
+def test_forecast_propose_branch():
+    """forecast v2：AI 只提案（dry-run）——先取修订号再登记提案，工作稿零改动。"""
+    svc, http = _svc3()
+    reply = svc._execute({"name": "forecast__propose_plan_changes",
+                          "args": {"plan_id": "plan-1", "scenario": "基准",
+                                   "patches": {"new_customers_growth": 0.2}, "rationale": "获客加码"}})
+    assert "基准" in reply and "new_customers_growth: 0.1 → 0.2" in reply and "未生效" in reply
+    posts = [b for m, p, b in http.calls if m == "POST"]
+    assert posts == [{"scenario": "基准", "patches": {"new_customers_growth": 0.2},
+                      "rationale": "获客加码", "base_revision": 3}]
+    # 提案动作不是写门：不进 pending 确认
+    assert svc._pending == {}
+
+
+def test_forecast_propose_via_chat_not_gated():
+    """chat 闭环：forecast 提案直接执行（非写门），回复携带差异摘要。"""
+    svc, http = _svc3()
+    res = svc.chat({"message": "给基准情景建议", "history": [], "tool_id": "forecast"})
+    assert res["pending_confirmation"] is None
+    assert "建议已生成" in res["reply"] and "new_customers_growth" in res["reply"]
+    assert any(m == "POST" and p.endswith("/proposals") for m, p, _ in http.calls)
 
 
 def test_coupon_list_runs_branch_dual_shape():
@@ -322,8 +399,8 @@ def test_exec_read_and_stage_name_gating():
         svc.stage("roi__get_state", {})             # 读工具不可走写登记
     with _pytest.raises(ValueError):
         svc.exec_read("nope", {})
-    out = svc.stage("forecast__set_scenario_params", {"scenario": "挑战", "params": {"new_customers_growth": 0.2}})
-    assert out["call_id"] and out["action"] == "forecast__set_scenario_params" and out["preview"]
+    out = svc.stage("roi__set_plan_params", {"plan": "计划1", "params": {"cvr": 0.2}})
+    assert out["call_id"] and out["action"] == "roi__set_plan_params" and out["preview"]
     assert out["call_id"] in svc._pending
 
 
@@ -332,11 +409,11 @@ def test_orchestrated_multi_write_relays_first_cancels_rest():
     from workbench.assistant.backend import ChatResult
     svc, http = _svc3()
     a = svc.stage("roi__set_plan_params", {"plan": "计划1", "params": {"cvr": 0.05}})
-    b = svc.stage("forecast__set_scenario_params", {"scenario": "挑战", "params": {"new_customers_growth": 0.1}})
+    b = svc.stage("roi__set_plan_params", {"plan": "计划2", "params": {"cvr": 0.1}})
     result = ChatResult(reply="已登记", orchestrated=True, tool_calls=[
         {"name": "roi__set_plan_params", "args": a["args"], "summary": "s1", "stage_pending": True,
          "call_id": a["call_id"], "preview": "p1"},
-        {"name": "forecast__set_scenario_params", "args": b["args"], "summary": "s2", "stage_pending": True,
+        {"name": "roi__set_plan_params", "args": b["args"], "summary": "s2", "stage_pending": True,
          "call_id": b["call_id"], "preview": "p2"}])
     svc.backend = OrchestratedBackend(result)
     res = svc.chat({"message": "两个都调", "history": [], "tool_id": "roi"})

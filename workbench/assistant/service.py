@@ -174,11 +174,9 @@ class AssistantService:
     def _preview(self, tc: dict) -> str:
         name, args = tc["name"], tc["args"]
         try:
-            if name == "forecast__set_scenario_params":
-                state = self.http("GET", "/t/forecast/api/state", None)
-                old = (state.get("scenarios") or {}).get(args["scenario"], {})
-                lines = [f"{k}: {old.get(k, '—')} → {v}" for k, v in args["params"].items()]
-                return f"目标测算「{args['scenario']}」情景：" + "；".join(lines)
+            if name == "forecast__apply_proposal":
+                return (f"目标测算方案 {args['plan_id']}：采纳提案 {args['proposal_id']}"
+                        f"（将写入工作稿，假设确认失效；已有运行不变）")
             if name == "roi__set_plan_params":
                 return f"投放计划「{args['plan']}」参数：" + "；".join(f"{k} → {v}" for k, v in args["params"].items())
         except Exception:  # noqa: BLE001 —— 预览失败不阻断确认门
@@ -269,26 +267,74 @@ class AssistantService:
         name, args = tc["name"], (tc["args"] or {})
         tool = self._by_name[name]["x-tool"]
         action = self._by_name[name]["x-action"]
-        if action == "get_state":  # 三工具共享：元数据优先于全名判定
+        if action == "get_state":  # coupon/roi 共享：元数据优先于全名判定（forecast 旧快路径已退役）
             data = self.http("GET", f"/t/{tool}/api/state", None)
             out = (_summarize_state(tool, data), data)
         else:
             handler = _EXECUTORS.get(name)
-            out = handler(self, args) if handler is not None else (f"已执行 {name}", None)
+            if handler is None:
+                # 不假成功（切片5）：声明了动作却没有执行器 = 编程错误，如实失败
+                raise ValueError(f"动作 {name} 没有实现执行器，拒绝假成功")
+            out = handler(self, args)
         return out if with_data else out[0]
 
 
 def _summarize_state(tool: str, data: dict) -> str:
-    if tool == "forecast":
-        plats = data.get("platforms", {})
-        mode_a = sum(1 for v in plats.values() if v.get("mode") == "A")
-        demo = "演示" if data.get("demo_used") else "正式"
-        return f"目标测算：{len(plats)} 平台（明细{mode_a}/聚合{len(plats)-mode_a}），{demo}数据"
     if tool == "coupon":
         return f"优惠券：{len(data.get('scenarios', []))} 个场景，{len(data.get('runs', []))} 个封存运行"
     if tool == "roi":
         return f"投放 ROI：{len(data.get('plans', []))} 个演示计划（合成假设）"
     return f"{tool} 状态已读取"
+
+
+def _fmt_yuan(v) -> str:
+    return "未定" if v is None else f"{float(v):,.0f} 元"
+
+
+def _exec_forecast_get_plan_state(svc, args):
+    """方案状态摘要（不含原始订单）：修订/目标/数据与质量/确认/最近运行。"""
+    pid = args["plan_id"]
+    detail = svc.http("GET", f"/t/forecast/api/v2/plans/{pid}", None)
+    d = detail["draft"]
+    snap = detail.get("snapshot") or {}
+    cs = detail.get("confirmation_status") or {}
+    kind_label = {"data_coverage": "数据覆盖", "caliber": "口径", "assumptions": "假设"}
+    confirmed = [kind_label.get(k, k) for k, v in cs.items() if v.get("confirmed")]
+    quality = snap.get("quality") or {}
+    runs = detail.get("runs") or []
+    data_label = ("已导入（合成演示数据）" if snap.get("synthetic") else "已导入") if snap else "未准备"
+    summary = (f"方案 {pid} r{d['revision']}：目标 {_fmt_yuan((d.get('goal') or {}).get('value'))}，"
+               f"数据{data_label}，已确认[{('、'.join(confirmed) or '无')}]，"
+               f"质量待确认 {len(quality.get('confirmable', []))} 项，"
+               f"最近运行 {runs[0]['run_id'] if runs else '无'}")
+    return summary, {"revision": d["revision"], "confirmations": cs,
+                     "runs": [r["run_id"] for r in runs]}
+
+
+def _exec_forecast_compare_runs(svc, args):
+    """运行对比：各运行采用档/合计/引擎/保存时间（只读快照，不改任何东西）。"""
+    pid = args["plan_id"]
+    lines, out = [], {}
+    for rid in (args.get("run_ids") or [])[:4]:
+        data = svc.http("GET", f"/t/forecast/api/v2/plans/{pid}/runs/{rid}", None)
+        run = data["run"]
+        total = (run.get("summary") or {}).get("selected_total")
+        out[rid] = {"selected": run["selected"], "selected_total": total,
+                    "saved": run["saved"], "engine_version": run["engine_version"]}
+        lines.append(f"{rid}（{run['selected']} {('%.0f 元' % total) if total is not None else '无摘要'}）")
+    return "运行对比：" + "；".join(lines), out
+
+
+def _exec_forecast_apply_proposal(svc, args):
+    """采纳提案（写操作，经确认门执行）：落同一份工作稿，假设确认随之失效。"""
+    pid, prid = args["plan_id"], args["proposal_id"]
+    detail = svc.http("GET", f"/t/forecast/api/v2/plans/{pid}", None)
+    out = svc.http("POST", f"/t/forecast/api/v2/plans/{pid}/proposals/{prid}/apply",
+                   {"base_revision": detail["draft"]["revision"]})
+    prop = out.get("proposal") or {}
+    return (f"已采纳提案 {prid}（{prop.get('scenario', '?')}情景），"
+            f"工作稿更新到 r{out['draft']['revision']}，假设确认已失效，需重新确认后计算。",
+            {"revision": out["draft"]["revision"], "proposal": prop})
 
 
 def _summarize_roi_calc(data: dict, args: dict) -> str:
@@ -303,23 +349,18 @@ def _summarize_roi_calc(data: dict, args: dict) -> str:
 
 # ---------- action 执行器表（两级分发：x-action 元数据快路径在 AssistantService._execute，此处为全名表） ----------
 
-def _exec_forecast_calc(svc, args):
-    data = svc.http("POST", "/t/forecast/api/calc", {"scenarios": args.get("scenarios") or {}})
-    nets = {r["scenario"]: round(sum(x["GMV_主口径"] for x in data["consolidated"] if x["scenario"] == r["scenario"]), 0)
-            for r in data["consolidated"]}
-    return ("全渠道年化GMV（按情景）：" + "；".join(f"{k} {v:.0f} 元" for k, v in nets.items()),
-            {"nets": nets, "consolidated": data.get("consolidated")})
-
-
-def _exec_forecast_set_scenario_params(svc, args):
-    sc, params = args["scenario"], args["params"]
-    svc.http("POST", "/t/forecast/api/assistant_params", {"scenarios": {sc: params}})
-    state = svc.http("GET", "/t/forecast/api/state", None)
-    saved = svc.http("GET", "/t/forecast/api/assistant_params", None)
-    merged = {n: {**p, **(saved.get("scenarios") or {}).get(n, {})} for n, p in state["scenarios"].items()}
-    data = svc.http("POST", "/t/forecast/api/calc", {"scenarios": merged})
-    gmv = sum(x["GMV_主口径"] for x in data["consolidated"] if x["scenario"] == sc)
-    return f"挑战情景已保存并重算：年化GMV {gmv:.0f} 元".replace("挑战", sc), {"gmv": gmv}
+def _exec_forecast_propose(svc, args):
+    """AI 提案（dry-run）：生成提案记录，不改工作稿；采纳由工作区页面显式发起（G2 双轨）。"""
+    plan_id = args["plan_id"]
+    detail = svc.http("GET", f"/t/forecast/api/v2/plans/{plan_id}", None)
+    rev = detail["draft"]["revision"]
+    proposal = svc.http("POST", f"/t/forecast/api/v2/plans/{plan_id}/proposals",
+                        {"scenario": args["scenario"], "patches": args["patches"],
+                         "rationale": args.get("rationale", ""), "base_revision": rev})
+    lines = [f"{p['param']}: {p['old']} → {p['new']}" for p in proposal["patches"]]
+    return (f"已对「{args['scenario']}」情景生成修改建议（未生效）：" + "；".join(lines)
+            + "。请在工作区右侧审阅后采纳或放弃。",
+            {"proposal_id": proposal["proposal_id"], "patches": proposal["patches"]})
 
 
 def _exec_roi_calc(svc, args):
@@ -365,8 +406,10 @@ def _exec_coupon_compare(svc, args):
 
 
 _EXECUTORS = {
-    "forecast__calc": _exec_forecast_calc,
-    "forecast__set_scenario_params": _exec_forecast_set_scenario_params,
+    "forecast__get_plan_state": _exec_forecast_get_plan_state,
+    "forecast__compare_runs": _exec_forecast_compare_runs,
+    "forecast__propose_plan_changes": _exec_forecast_propose,
+    "forecast__apply_proposal": _exec_forecast_apply_proposal,
     "roi__calc": _exec_roi_calc,
     "roi__set_plan_params": _exec_roi_set_plan_params,
     "coupon__list_runs": _exec_coupon_list_runs,

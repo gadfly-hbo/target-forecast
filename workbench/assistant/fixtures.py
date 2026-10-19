@@ -17,17 +17,31 @@ FIXTURES = [
         "when_tools": True,
         "reply": "基准情景的合计净贡献为 {tool_result_summary}。",
     },
-    # ② 调参类：forecast 挑战情景新客增速调到 25%（写操作，走确认门）
+    # ② 调参类：roi 计划调参（写操作，走确认门）
     {
-        "match": "新客增速",
+        "match": "调计划",
         "reply": "好的，请确认以下参数变更。",
-        "tool_calls": [{"name": "forecast__set_scenario_params",
-                        "args": {"scenario": "挑战", "params": {"new_customers_growth": 0.25}}}],
+        "tool_calls": [{"name": "roi__set_plan_params",
+                        "args": {"plan": "计划1", "params": {"cvr": 0.05}}}],
     },
     {
         "match": "已确认",
         "when_tools": True,
         "reply": "已应用。{tool_result_summary}",
+    },
+    # ④ 提案类：forecast 提案 dry-run（G2 双轨：非写门、直接执行、不落草稿，采纳在工作区发起）
+    {
+        "match": "给基准情景建议",
+        "reply": "",
+        "tool_calls": [{"name": "forecast__propose_plan_changes",
+                        "args": {"plan_id": "plan-1", "scenario": "基准",
+                                 "patches": {"new_customers_growth": 0.2},
+                                 "rationale": "获客加码"}}],
+    },
+    {
+        "match": "给基准情景建议",
+        "when_tools": True,
+        "reply": "建议已生成：{tool_result_summary}",
     },
     # ③ 越界类：要求改优惠券场景（不存在的 action）
     {

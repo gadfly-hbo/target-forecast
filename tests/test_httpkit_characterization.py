@@ -59,17 +59,11 @@ def roi_url(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def fc_state():
-    cfg = fc_server.load_cfg(ROOT)
-    state = fc_server.WorkbenchState(ROOT, cfg["caliber"])
-    state.load()
-    return state, cfg
-
-
-@pytest.fixture(scope="module")
-def fc_url(fc_state):
-    state, cfg = fc_state
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fc_server.make_handler(state, cfg))
+def fc_url(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("fc_char")
+    (tmp / "config.yaml").write_text((ROOT / "config.yaml").read_text(encoding="utf-8"),
+                                     encoding="utf-8")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fc_server.make_handler(tmp))
     yield _serve(httpd)
     httpd.shutdown()
 
@@ -106,8 +100,9 @@ def _raw_get_req(req):
 
 # 1. 响应头现状：三个工具有 no-store，壳没有
 def test_cache_control_header_current_state(coupon_url, roi_url, fc_url, shell_url):
-    for base in (coupon_url, roi_url, fc_url):
-        _, headers, _ = _raw_get(base + "/api/state")
+    for base, path in ((coupon_url, "/api/state"), (roi_url, "/api/state"),
+                       (fc_url, "/api/v2/state")):  # forecast 已切 v2
+        _, headers, _ = _raw_get(base + path)
         assert headers.get("Cache-Control") == "no-store"
     _, headers, _ = _raw_get(shell_url + "/api/state")
     assert headers.get("Cache-Control") == SHELL_CACHE_CONTROL_CURRENT
@@ -121,10 +116,12 @@ def test_404_body_shape_current_state(coupon_url, roi_url, fc_url, shell_url):
 
 
 # 3. 缺失静态文件：统一 static() 后 404（deliberate-change #3，原 forecast 为 500）
-def test_forecast_missing_static_404(fc_state, monkeypatch, tmp_path):
-    monkeypatch.setattr(fc_server, "STATIC_DIR", tmp_path)  # 空目录
-    state, cfg = fc_state
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fc_server.make_handler(state, cfg))
+def test_forecast_missing_static_404(monkeypatch, tmp_path_factory, tmp_path):
+    tmp_root = tmp_path_factory.mktemp("fc_404")
+    (tmp_root / "config.yaml").write_text((ROOT / "config.yaml").read_text(encoding="utf-8"),
+                                          encoding="utf-8")
+    monkeypatch.setattr(fc_server, "V2_STATIC", tmp_path)  # 空目录
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fc_server.make_handler(tmp_root))
     base = _serve(httpd)
     try:
         status, _, body = _raw_get(base + "/style.css")
@@ -139,8 +136,13 @@ def test_demo_responses_serialize_with_allow_nan_false(coupon_url, roi_url, fc_u
     demo = json.loads(demo)
     _, _, cmp_body = _raw_post(coupon_url + "/api/compare", {"scenario": demo["scenario"]})
     _, _, roi_body = _raw_post(roi_url + "/api/calc", {})
-    _, _, fc_body = _raw_post(fc_url + "/api/calc", {"scenarios": {}})
-    for body in (cmp_body, roi_body, fc_body):
+    # forecast v2：建方案 + 详情 + 状态（NaN→None 契约经 models.sanitize）
+    _, _, plan_body = _raw_post(fc_url + "/api/v2/plans", {"need": "序列化契约测试"})
+    plan = json.loads(plan_body)
+    pid = plan["draft"]["plan_id"]
+    _, _, detail_body = _raw_get(fc_url + f"/api/v2/plans/{pid}")
+    _, _, state_body = _raw_get(fc_url + "/api/v2/state")
+    for body in (cmp_body, roi_body, plan_body, detail_body, state_body):
         json.dumps(json.loads(body), ensure_ascii=False, allow_nan=False)  # 不抛即通过
 
 

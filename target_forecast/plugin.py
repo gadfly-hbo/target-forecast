@@ -1,10 +1,12 @@
-"""目标测算的 workbench 插件适配：manifest + 路由绑定。
+# -*- coding: utf-8 -*-
+"""forecast 工具插件化适配：向壳暴露 manifest 与路由。
 
-壳内路径 /t/forecast/... 剥离前缀后复用 server.route_get/route_post（单一事实源）。
-root 必须为仓库根绝对路径（含 config.yaml 与 data/）。
+壳内路径 /t/forecast/... 剥离前缀后与 standalone（main.py serve）共用
+server.make_routes 的同一组路由（单一事实源）。
+standalone=True：壳导航整页跳转（v2 方案工作区自带完整 chrome，不进 iframe）。
+AI 动作（G2 双轨）：读与提案 dry-run 不落草稿；唯一写动作 apply_proposal 走确认门，
+采纳仍是用户显式决定；工作区页面的采纳按钮与之共用同一业务入口（plans.service）。
 """
-from __future__ import annotations
-
 from pathlib import Path
 
 from . import server
@@ -12,52 +14,65 @@ from . import server
 
 def build_tool(root: Path) -> dict:
     root = Path(root).resolve()
-    cfg = server.load_cfg(root)
-    state = server.WorkbenchState(root, cfg["caliber"])
-
-    def handle_get(h, path):
-        return server.route_get(state, cfg, h, path)
-
-    def handle_post(h, path):
-        return server.route_post(state, cfg, h, path)
+    handle_get, handle_post = server.make_routes(root)
 
     return {
         "id": "forecast",
         "name": "目标测算",
         "icon": "🎯",
-        "static_dir": server.STATIC_DIR,
+        "standalone": True,
+        "handle_get": handle_get,
+        "handle_post": handle_post,
+        "static_dir": server.V2_STATIC,
         "seed_demo": None,
         "actions": [
             {
-                "id": "get_state",
-                "description": "读取目标测算工作台状态：平台清单、模式A/B、演示/正式标记、默认情景参数。",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-            {
-                "id": "calc",
-                "description": "按指定三档情景参数重算人/场/货三视角与全渠道汇总，返回各平台结果。scenarios 省略时用默认参数。",
+                "id": "get_plan_state",
+                "description": "读取目标测算某方案状态：修订号、目标、数据与质量、三域确认、最近运行摘要（不含原始订单）。",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "scenarios": {"type": "object", "description": "三档情景参数（与 /api/calc 同结构）"}
-                    },
-                    "required": [],
+                    "properties": {"plan_id": {"type": "string"}},
+                    "required": ["plan_id"],
                 },
             },
             {
-                "id": "set_scenario_params",
-                "description": "调整某档情景的增长参数（写操作，需用户确认）：给出 scenario 与参数补丁，返回调整后该档的全渠道年化GMV。",
+                "id": "compare_runs",
+                "description": "比较某方案下若干已保存运行：各运行的采用档、合计 GMV、引擎与保存时间。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {"type": "string"},
+                        "run_ids": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["plan_id", "run_ids"],
+                },
+            },
+            {
+                "id": "propose_plan_changes",
+                "description": "对指定方案的某档情景提出参数调整建议（dry-run，不落工作稿）：返回调整前后差异与影响说明，用户采纳后才生效。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {"type": "string"},
+                        "scenario": {"type": "string", "enum": ["保守", "基准", "挑战"]},
+                        "patches": {"type": "object", "description": "增长参数补丁，如 {\"new_customers_growth\": 0.2}"},
+                        "rationale": {"type": "string"},
+                    },
+                    "required": ["plan_id", "scenario", "patches"],
+                },
+            },
+            {
+                "id": "apply_proposal",
+                "description": "采纳一条提案并写入方案工作稿（写操作，需用户确认）：假设确认随之失效，需要重新确认后计算；已有运行不变。",
                 "write": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "scenario": {"type": "string", "enum": ["保守", "基准", "挑战"]},
-                        "params": {"type": "object", "description": "增长参数补丁，如 {\"new_customers_growth\": 0.2}"},
+                        "plan_id": {"type": "string"},
+                        "proposal_id": {"type": "string"},
                     },
-                    "required": ["scenario", "params"],
+                    "required": ["plan_id", "proposal_id"],
                 },
             },
         ],
-        "handle_get": handle_get,
-        "handle_post": handle_post,
     }

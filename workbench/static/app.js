@@ -26,6 +26,11 @@ async function main() {
   const items = [...nav.querySelectorAll(".nav-item")];
   const select = (id) => {
     const tool = st.tools.find((t) => t.id === id);
+    if (tool && tool.standalone) {
+      // standalone 工具自带完整 chrome：整页跳转，不进 iframe（避免双 chrome）
+      location.href = `t/${id}/`;
+      return;
+    }
     items.forEach((a) => a.classList.toggle("active", a.dataset.id === id));
     $("sb-tool").textContent = tool ? `${tool.name}` : id;
     loadToolState(id);
@@ -34,6 +39,8 @@ async function main() {
   };
   items.forEach((a) =>
     a.addEventListener("click", (e) => {
+      const tool = st.tools.find((t) => t.id === a.dataset.id);
+      if (tool && tool.standalone) return;  // 走 <a href> 默认整页导航
       e.preventDefault();
       select(a.dataset.id);
       history.replaceState(null, "", `?tool=${a.dataset.id}`);

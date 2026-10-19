@@ -59,9 +59,9 @@ def test_chat_endpoint_end_to_end(echo_server):
 
 def test_chat_write_confirmation_over_http(echo_server):
     status, res = _post(echo_server + "/api/assistant/chat",
-                        {"message": "把挑战情景新客增速调到 25%", "history": [], "tool_id": "forecast"})
+                        {"message": "把计划1的 cvr 调计划到 5%", "history": [], "tool_id": "roi"})
     assert status == 200
-    assert res["pending_confirmation"]["action"] == "forecast__set_scenario_params"
+    assert res["pending_confirmation"]["action"] == "roi__set_plan_params"
     # 确认后执行（tmp 隔离：用临时 root 避免写真实 workspace）
     # —— 本 fixture 用真实 ROOT 仅走到 pending 步，确认步在 service 单测覆盖副作用
 
@@ -95,13 +95,57 @@ def test_backend_unavailable_503():
 # ---------- review round 1 修复回归 ----------
 
 def test_confirm_write_real_loopback(tmp_path):
-    """阻断项 1 回归：真实回环走通 forecast 确认写（tmp root 隔离，不落真实 workspace）。"""
+    """阻断项 1 回归：真实回环走通 AI 提案（tmp root 隔离；G2 双轨——提案落盘、草稿不动）。"""
     import shutil
 
-    from target_forecast import demo as tf_demo
+    from target_forecast.plans import service as plan_service
 
     shutil.copy(ROOT / "config.yaml", tmp_path / "config.yaml")
-    tf_demo.generate(tmp_path)  # 生成演示数据到 tmp root 的 workspace/forecast
+    draft = plan_service.create_plan(tmp_path, "测试提案链路")
+    #  fixture ④ 的 plan_id 固定为 plan-1：这里改为先建方案再用真实 id 走 chat
+    import copy
+
+    import workbench.assistant.fixtures as fx
+    fixtures = copy.deepcopy(fx.FIXTURES)  # 深拷贝：改 plan_id 不污染共享 fixtures
+    for f in fixtures:
+        for tc in f.get("tool_calls") or []:
+            if tc["name"] == "forecast__propose_plan_changes":
+                tc["args"]["plan_id"] = draft["plan_id"]
+
+    reg = build_default_registry(tmp_path)
+    svc = runtime.build_service(tmp_path, reg, backend=EchoBackend(fixtures))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(reg, assistant=svc))
+    svc.bind_port(httpd.server_address[1])
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        status, res = _post(url + "/api/assistant/chat",
+                            {"message": "给基准情景建议", "history": [], "tool_id": "forecast"})
+        assert status == 200, res
+        # 提案 dry-run：不走确认门，回复带差异摘要
+        assert res["pending_confirmation"] is None
+        assert "new_customers_growth" in res["reply"]
+        # 提案已落盘、工作稿未变（G2：AI 不直写业务对象）
+        proposals = plan_service.list_proposals(tmp_path, draft["plan_id"])
+        assert len(proposals) == 1 and proposals[0]["status"] == "pending"
+        assert proposals[0]["patches"][0]["new"] == 0.2
+        assert plan_service.load_draft(tmp_path, draft["plan_id"])["revision"] == 1
+    finally:
+        httpd.shutdown()
+
+
+def test_confirm_apply_proposal_real_loopback(tmp_path):
+    """切片5 契约冒烟：stage→confirm→exec_write→draft 真实落盘（唯一写动作，确认门后执行）。"""
+    import shutil
+
+    from target_forecast.plans import service as plan_service
+
+    shutil.copy(ROOT / "config.yaml", tmp_path / "config.yaml")
+    draft = plan_service.create_plan(tmp_path, "采纳链路冒烟")
+    pid = draft["plan_id"]
+    proposal = plan_service.propose_change(tmp_path, pid, "基准",
+                                           {"new_customers_growth": 0.22}, "获客加码",
+                                           base_revision=1)
 
     reg = build_default_registry(tmp_path)
     svc = runtime.build_service(tmp_path, reg, backend=EchoBackend(FIXTURES))
@@ -110,15 +154,19 @@ def test_confirm_write_real_loopback(tmp_path):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{httpd.server_address[1]}"
     try:
+        # 写提案登记（sidecar /stage 同款入口）→ 确认 → 真实回环执行 apply
+        staged = svc.stage("forecast__apply_proposal",
+                           {"plan_id": pid, "proposal_id": proposal["proposal_id"]})
+        assert "采纳提案" in staged["preview"]  # 确认门预览可见
         status, res = _post(url + "/api/assistant/chat",
-                            {"message": "把挑战情景新客增速调到 25%", "history": [], "tool_id": "forecast"})
-        assert status == 200 and res["pending_confirmation"]
-        call_id = res["pending_confirmation"]["call_id"]
-        status, res2 = _post(url + "/api/assistant/chat", {"confirm": call_id, "tool_id": "forecast"})
-        assert status == 200, res2  # 修复前此处 500/断连
-        assert "已应用" in res2["reply"]
-        saved = json.loads((tmp_path / "workspace" / "forecast" / "assistant_params.json").read_text())
-        assert saved["scenarios"]["挑战"]["new_customers_growth"] == 0.25
+                            {"confirm": staged["call_id"], "tool_id": "forecast"})
+        assert status == 200, res
+        assert "已采纳提案" in res["reply"] and "需重新确认" in res["reply"]
+        # draft 真实落盘：修订 +1、假设确认失效（与工作区采纳按钮同一业务入口）
+        d = plan_service.load_draft(tmp_path, pid)
+        assert d["revision"] == 2
+        assert d["scenarios"]["基准"]["params"]["new_customers_growth"] == 0.22
+        assert plan_service.confirmation_status(d)["assumptions"]["confirmed"] is False
     finally:
         httpd.shutdown()
 
@@ -144,7 +192,7 @@ def test_cancel_clears_pending():
     from workbench.assistant.service import AssistantService
     reg = build_default_registry(ROOT)
     svc = AssistantService(reg, EchoBackend(FIXTURES), lambda *a, **k: {})
-    res = svc.chat({"message": "把挑战情景新客增速调到 25%", "history": [], "tool_id": "forecast"})
+    res = svc.chat({"message": "把计划1的 cvr 调计划到 5%", "history": [], "tool_id": "roi"})
     call_id = res["pending_confirmation"]["call_id"]
     out = svc.chat({"cancel": call_id})
     assert out["reply"]

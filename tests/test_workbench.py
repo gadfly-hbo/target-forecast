@@ -159,11 +159,25 @@ def test_coupon_static_no_root_absolute_api():
 
 
 @pytest.fixture(scope="module")
-def forecast_shell_url():
+def forecast_shell_url(tmp_path_factory):
     from target_forecast import plugin as forecast_plugin
 
+    tmp = tmp_path_factory.mktemp("forecast_shell")
+    (tmp / "config.yaml").write_text((ROOT / "config.yaml").read_text(encoding="utf-8"),
+                                     encoding="utf-8")
+    # legacy 导出测试夹具：旧版产物只读下载（v2 运行产物在 test_v2_http 覆盖）
+    out = tmp / "workspace" / "forecast" / "output"
+    (out / "中间指标").mkdir(parents=True)
+    import io
+    import pandas as pd
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        pd.DataFrame({"a": [1]}).to_excel(xw, index=False)
+    (out / "目标测算报告.xlsx").write_bytes(buf.getvalue())
+    (out / "中间指标" / "月度指标_天猫.csv").write_text("month,gmv\n2026-01,1.0\n",
+                                                    encoding="utf-8-sig")
     reg = Registry()
-    reg.register(forecast_plugin.build_tool(ROOT))
+    reg.register(forecast_plugin.build_tool(tmp))
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(reg))
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
@@ -175,21 +189,32 @@ def test_forecast_shell_manifest_and_state(forecast_shell_url):
     status, body = _get(forecast_shell_url + "/api/state")
     tools = {t["id"]: t for t in json.loads(body)["tools"]}
     assert status == 200 and tools["forecast"]["name"] == "目标测算"
+    assert tools["forecast"]["standalone"] is True  # G6：整页跳转，不进 iframe
 
-    status, body = _get(forecast_shell_url + "/t/forecast/api/state")
+    status, body = _get(forecast_shell_url + "/t/forecast/api/v2/state")
     state = json.loads(body)
     assert status == 200
-    assert set(state["platforms"]) == {"天猫", "抖音", "京东", "私域"}
-    assert state["platforms"]["天猫"]["mode"] == "A"
+    assert state["engine_version"].startswith("forecast-engine-")
+    assert "plans" in state and "runs" in state
+
+    # 旧接口在壳内同样退役
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _get(forecast_shell_url + "/t/forecast/api/state")
+    assert ei.value.code == 404
+    assert json.loads(ei.value.read())["code"] == "retired"
 
 
-def test_forecast_shell_calc(forecast_shell_url):
-    """壳内前缀下走通 calc 业务闭环（断言与独立 server 冒烟一致）。"""
-    status, res = _post(forecast_shell_url + "/t/forecast/api/calc", {"scenarios": {}})
-    assert status == 200
-    assert set(res["platforms"]) == {"天猫", "抖音", "京东", "私域"}
-    assert res["platforms"]["私域"]["main_view"] == "场"
-    assert len(res["consolidated"]) == 3 * 12
+def test_forecast_shell_v2_plan_flow(forecast_shell_url):
+    """壳内前缀下走通 v2 建方案闭环（前缀剥离 + v2 路由）。"""
+    status, res = _post(forecast_shell_url + "/t/forecast/api/v2/plans",
+                        {"need": "壳内闭环冒烟", "title": "壳内方案"})
+    assert status == 201
+    pid = res["draft"]["plan_id"]
+    status, body = _get(forecast_shell_url + f"/t/forecast/api/v2/plans/{pid}")
+    assert status == 200 and json.loads(body)["draft"]["title"] == "壳内方案"
+    # 整页 UI 在壳内可直达（standalone 不 iframe）
+    status, html = _get(forecast_shell_url + "/t/forecast/")
+    assert status == 200 and "经营目标测算" in html.decode()
 
 
 def test_forecast_static_no_root_absolute_api():
@@ -234,20 +259,15 @@ def test_forecast_export_path_traversal_blocked(forecast_shell_url):
 
 
 def test_forecast_export_ui_entry():
-    """review round 1/2 blocker：导出端点必须有可达的前端入口（US5/G5）。
-
-    对应性校验：index.html 里每个 data-pane 页签都必须在 app.js 的
-    切换逻辑中出现（round 2 抓到的假证据：只断言字符串存在，漏了切换漏接）。
-    """
-    import re
-
-    html = (ROOT / "target_forecast" / "static" / "index.html").read_text(encoding="utf-8")
-    js = (ROOT / "target_forecast" / "static" / "app.js").read_text(encoding="utf-8")
-    panes = re.findall(r'data-pane="([^"]+)"', html)
-    assert len(panes) >= 3 and "exports-pane" in panes
-    for pane in panes:
-        assert f'"{pane}"' in js, f"页签 {pane} 未接入切换逻辑"
-    assert "api/export/report" in js and "encodeURIComponent" in js
+    """导出入口在 v2 UI 中可达（已批准 demo 的导出对话框 + 绑定运行的下载）。"""
+    v2 = ROOT / "target_forecast" / "static" / "v2"
+    app = (v2 / "app.js").read_text(encoding="utf-8")
+    api = (v2 / "api.js").read_text(encoding="utf-8")
+    html = (v2 / "index.html").read_text(encoding="utf-8")
+    assert 'data-action="export"' in app and "downloadExport" in app
+    assert "下载 Excel 报告" in app and "下载月度 CSV 包" in app and "下载快照 JSON" in app
+    assert "/export/" in api  # 绑定指定运行的导出端点
+    assert "api.js" in html and "app.js" in html
 
 
 # ---------- 切片 4：壳导航前端 ----------

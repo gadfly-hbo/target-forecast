@@ -7,6 +7,8 @@
         "icon": "🎟",
         "static_dir": Path | None,      # 工具静态资源目录
         "seed_demo": callable(root) | None,   # 数据为空时播种（可选）
+        "standalone": bool,             # 可选；True = 壳导航整页跳转（工具自带完整 chrome），
+                                        # 缺省 False = iframe 装载（coupon/ROI 行为不变）
         "actions": [],                  # 机器可读 action 清单（JSON Schema，P3 LLM 预留）
         "handle_get":  callable(handler, path) -> bool,   # path 已剥离 /t/{id} 前缀
         "handle_post": callable(handler, path) -> bool,   # 返回 False 表示未命中（壳回 404）
@@ -16,7 +18,7 @@
 """
 from __future__ import annotations
 
-MANIFEST_KEYS = ("id", "name", "icon")
+MANIFEST_KEYS = ("id", "name", "icon", "standalone")
 
 
 class Registry:
@@ -43,5 +45,6 @@ class Registry:
         return list(self._tools)
 
     def manifest(self) -> list[dict]:
-        """壳 /api/state 暴露的工具清单（仅 manifest 键）。"""
-        return [{k: t[k] for k in MANIFEST_KEYS} for t in self._tools.values()]
+        """壳 /api/state 暴露的工具清单（仅 manifest 键；standalone 缺省 False）。"""
+        return [{k: t.get(k) if k != "standalone" else bool(t.get("standalone"))
+                 for k in MANIFEST_KEYS} for t in self._tools.values()]

@@ -107,13 +107,14 @@ def _defs_and_imports(path: Path):
 
 
 def test_no_third_copy_guard():
-    """防第三份拷贝：main.py/server.py 不再私有定义 scan，且都 import pipeline。"""
+    """防第三份拷贝：main.py/server.py 不再私有定义 scan；pipeline 引用在 main 与 plans 层。"""
     main_defs, main_imports = _defs_and_imports(ROOT / "main.py")
     srv_defs, srv_imports = _defs_and_imports(ROOT / "target_forecast" / "server.py")
+    svc_defs, svc_imports = _defs_and_imports(ROOT / "target_forecast" / "plans" / "service.py")
     assert "_collect_inputs" not in main_defs, "main.py 仍持有扫描拷贝"
     assert "_scan" not in srv_defs, "server.py 仍持有扫描拷贝"
     assert any(i.endswith("pipeline") for i in main_imports), "main.py 未 import pipeline"
-    assert any(i.endswith("pipeline") for i in srv_imports), "server.py 未 import pipeline"
+    assert any(i.endswith("pipeline") for i in svc_imports), "plans/service.py 未 import pipeline"
 
 
 def test_empty_input_fork_main_exits(tmp_path, monkeypatch, cfg):
@@ -124,8 +125,9 @@ def test_empty_input_fork_main_exits(tmp_path, monkeypatch, cfg):
         main.run_flow(cfg, demo_flag=False)
 
 
-def test_empty_input_fork_server_generates_demo(tmp_path, cfg):
-    """空输入分叉：工作台侧自动生成 demo 并置 demo_used。"""
-    state = server.WorkbenchState(tmp_path, cfg["caliber"])
-    state.load()
-    assert state.demo_used is True and state.platforms
+def test_empty_input_fork_server_no_silent_demo(tmp_path, cfg):
+    """空输入分叉：服务端不再静默生成演示数据（G9）——v2 方案需显式导入或载入合成示例。"""
+    from target_forecast.plans import service
+    d = service.create_plan(tmp_path, "目标")
+    issues = service.readiness(d)
+    assert any("数据" in i for i in issues), "无数据时应被就绪检查拦下，而非静默造数"
