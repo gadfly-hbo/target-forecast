@@ -106,6 +106,16 @@ def write_report(out_path, results: dict, consolidated: pd.DataFrame,
     notes = [
         "零售目标测算报告（线上 · 人货场三视角）",
         f"生成时间：{datetime.now():%Y-%m-%d %H:%M}    数据标记：{'演示数据 DEMO' if demo else '正式数据'}",
+    ]
+    ident = cfg.get("identity")
+    if ident:  # v2 运行导出：方案版本/运行身份/输入来源随报告固定（合同要求）
+        notes += [
+            "【运行身份】",
+            f"方案 {ident.get('plan_id')} · 版本 {ident.get('version')} · 运行 {ident.get('run_id')}"
+            f" · 引擎 {ident.get('engine_version')} · 保存 {ident.get('saved')}",
+            f"输入来源：{ident.get('sources') or '（未标注）'}（快照 {ident.get('snapshot_id')}）",
+        ]
+    notes += [
         "",
         "【口径说明】",
         "1. GMV = 支付口径实付金额之和（应已扣除退款；抖音等高退货平台务必用净额）。",

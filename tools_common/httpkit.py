@@ -52,6 +52,11 @@ class Responder:
             return {}
         return json.loads(self.h.rfile.read(length).decode("utf-8"))
 
+    def read_raw_body(self) -> bytes:
+        """读取原始字节请求体（文件上传等场景）。"""
+        length = int(self.h.headers.get("Content-Length") or 0)
+        return self.h.rfile.read(length) if length else b""
+
     def static(self, name: str):
         """服务 static_dir 下的文件；越界或不存在一律 404 JSON。"""
         path = (self.static_dir / name).resolve() if self.static_dir is not None else None
