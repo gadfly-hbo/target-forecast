@@ -1,54 +1,81 @@
-# Red-Team: (c)-resume 检查点重放（fresh-context 子代理，2026-10-16，实证 T1-T7 脚本在 /tmp/rt-redteam/）
+# Red-Team: target-forecast refactor around unified draft/plan-version/run identity (proposal `.flow/proposal.md`, 2026-10-19)
 
-> 过程注记：红队子代理首次因 429 五小时配额中断，恢复后完成——非降级模式，为 fresh-context 标准红队。
+> 执行方式：全新只读 explore 子代理，输入仅 `.flow/proposal.md` + `strategy-red-team/SKILL.md` + 仓库只读代码证据。以下为子代理返回全文（verbatim）。
 
-## 实证结论（全部跑通 node --test）
+**Plan in one line:** rebuild the forecast tool around one business-update entry and disk-persisted draft/version/run identities, fix five confirmed engine bugs without fingerprinting old outputs, land the approved 5-view demo as the real UI on the existing stdlib-HTTP workbench, wire AI through the existing pi sidecar without paid model calls — all inside one dev-flow budget (`.flow/state.json`: `max_turns: 60`, 12h wall clock, currently `ASSESS`).
 
-| # | 提案依赖的机制 | 实测裁定 | 证据 |
-|---|---|---|---|
-| 1 | authorize 拒绝的 run 留下可恢复的 'tool-admitted' 检查点 | **半真——检查点存在但该状态不可恢复**。blocked run 结束为 `blocked/AUTHORITY_REQUIRED`；saveCheckpoint 依次收到 3 份：`ready`(含待执行工具调用、无结果) → `tool-admitted(inFlightToolId)` → `ready`(带 `toolFailed:true` 结果)。恢复用 'tool-admitted' → `failed/STATE_FAILED`；末份 toolFailed ready 同样 STATE_FAILED；**只有第一份 ready（pending 调用未确认）可恢复** | T1/T2/T2b/T3；validation.ts:119（tool-admitted 一律拒绝）、pi-adapter.ts:575（toolFailed 确认→STATE_FAILED）、index.ts:231（authorize 在 execute 前）、pi-adapter.ts:599-607（beforeToolCall 先存再执行——顺序与提案引用一致） |
-| 2 | checkpoint 可作不透明 JSON 令牌往返；resume 免模型调用重放 | **真**。纯 JSON 深相等往返通过；恢复重放步零模型调用（pi-adapter.ts:627-631 直接复用 assistant 内容），随后恰 1 次模型调用措辞终稿；写工具以原始 args 恰好执行 1 次 | T1/T3 |
-| 3 | base createRuntime().runAgent 支持 checkpoint（无需 0.4.0 session 契约） | **真**。pi-adapter.ts:160-162 按 `checkpoint||saveCheckpoint||shouldYield` 分派 driveCheckpoint，base 路径完全可达；index.ts:122 仅要求 validateCheckpoint 通过 | T3（全程未用 createSessionRuntime） |
-| 4 | shouldYield/BUSINESS_WAIT 替代路径 | **不合身，关闭开放问题 4**。afterToolCall 在工具执行之后才 waiting——效果发生在等待前，无法实现"确认后才执行"；退化为 c-simple | 代码路径推断（无歧义） |
+### Verification note (evidence quality)
 
-**实证硬约束（实现必须遵守）**：
-- **R1** 恢复请求 `prompt` 必须为空串 `''`（非缺省）：pending + 非空 prompt → INVALID_REQUEST（pi-adapter.ts:574，T6）
-- **R2** 带 checkpoint 必须同时带 saveCheckpoint 回调；`toolExecution:'parallel'` 禁用（validation.ts:79-80）
-- **R3** checkpoint 无签名/完整性校验：手造同 taskId 的 ready 检查点（call_evil）被照单执行（T4）——validateCheckpoint 只查结构/taskId 匹配/调用-结果配对
-- **R4** 同 taskId 恢复时 limits（或工具定义/model）任一字节不同 → CONFIGURATION_CHANGED（T5；budget.ts:16）；/chat→/resume 顺序不触发 TASK_BUSY；configuration digest 不含 execute 闭包与 system（index.ts:33,158-162）——两身份 execute 成立
-- **R5** 多写重放：检查点里最后一条 assistant 的**所有**未确认调用都会重放执行（T7 两笔全执行）
-- **R6** checkpoint ≤ 2MB（validation.ts:86）；messages 含全部历史与 exec_read 完整 result 载荷
-- **R7** sidecar 重启：预算台账落盘且启动丢弃 owner、digest 为内容哈希——同 taskId 恢复不受预算阻碍；但内存检查点 stash 丢失 → Python 降级路径是必须项
+Before attacking, I confirmed the plan's factual basis is solid — which makes the attacks below about *execution and scope*, not about a misdiagnosed problem:
 
-## Top Kill-Assumptions
+- **Bug 1 (UV 缺列） reproduced live:** `aggregate.consolidate(person_all, main_all, None)` → `KeyError "['UV'] not in index"` (`target_forecast/aggregate.py:28-41`: when `field_all is None`, no `UV` column is created but `"UV"` stays in the `cols` list at line 39). Any all-mode-A workspace turns `/api/calc` into a 500.
+- **Bug 2 (SKU 梯队索引错配） reproduced live:** `ingest_detail.py:123-126` assigns `_assign_tiers(core, ...).values` — `.values` is in *sorted* order, `core` is in groupby order. With unsorted core, a 5-yuan SKU got labeled 爆款. The existing `tests/test_core.py::test_tier_assignment_pareto` cannot catch this: it feeds pre-sorted data and asserts on the *returned* series, not the assigned column.
+- **Bug 3 (short-history annualization) confirmed by reading:** `engine.py:46` `annual_gmv = win["gmv"].sum()` with `win = tail(baseline_months)` — no length guard. 4 months of history → "基期年化GMV" is a 4-month *sum*, while `project_person` annualizes via `mean × 12 × shares` (`engine.py:66`). `aggregate.platform_annual` then reports a 增速 inflated ~3×. `tests/test_pipeline.py` uses exactly 4-month fixtures and asserts shapes, not magnitudes.
+- **Bug 4 (A/B silent overwrite) confirmed:** `pipeline.py:38-48` — detail loop first, agg loop second, both do `platforms[platform] = ...`; same-stem xlsx in `orders/` and `metrics/` → mode B silently replaces mode A.
+- **Bug 5 (mixed-view denominator) confirmed:** `aggregate.py:26` — 全渠道客单 = 主口径GMV (field view where UV exists) ÷ *person-view* orders.
+- The proposal's pin "工作区干净" is **already stale** (git status: 5 `.flow/*.md` deletions + untracked `archive/`) — cosmetic, but it demonstrates that pinned-state narratives decay within hours in this repo.
 
-**A1（最高）**：按直觉 stash "tool-admitted 那份"或"最后一份"——恢复 100% 失败且形态为 STATE_FAILED 不易归因。修复：按"最后一条 assistant 有未确认 calls 且无 toolFailed 结果的**第一份 ready**"留存。
-**A2**：/resume 若接受请求体 checkpoint blob——任何本机进程可用伪造 ready 检查点绕过 /stage 预览驱动任意写参数（preview 与实际 args 解耦）。修复：/resume 只带 call_id，sidecar 从自有 stash 取（Python 令牌仅作查询键）。
-**A3**：多写整批重放——第二个写若因 call_id 已被弹出而报错：首个写已生效、run 以 TOOL_FAILED 收场（用户看到失败实际已写）。修复：/resume 构造 execute 时只给首个写绑 call_id，其余写闭包返回良性"已取消（请逐个确认）"结果。
-**A4**：/resume "顺手"换 limits/裁剪 tools/write_actions 排序不一致 → CONFIGURATION_CHANGED 全挂。立为不变量 + 防回归断言。
-**A5**：/resume 超时但 sidecar 已完成写 → Python 降级再执行一遍（幂等设值型双执行良性但须知）。降级判据=明确失败（连接拒绝/非 2xx）；超时保守返回错误不自动降级执行。
+### Top Kill-Assumptions (ranked by impact × likelihood × cheapness-to-test)
 
-## 次级（实现清单）
+**1. (Claim c) "We can fix 5 interacting correctness bugs and trust the result, using only hand-derived minimal synthetic expectations."**
 
-- blocked 的 RunResult 无文本载荷 → 回复取检查点内 assistant 消息 text 前缀 + 固定确认文案，前端 preview 兜底
-- **/chat blocked 必须以 200 携带 {blocked, proposal} 返回**——否则 PiSidecarBackend 把非 503 一律抛 BackendUnavailable（backend.py:85-86；现状 server.ts 会 502）
-- 140s RUN_SIGNAL + toolTimeout 120s 罩住写舞步+终稿轮；舞步中途超时留"参数已存未重算"中间态（与现行失败面等价，降级路径可覆盖）
-- 恢复 run 的审计含 tool.admitted/tool.finished 真实写记录——比今天（写在 Python、sidecar 审计不可见）更好
-- "免模型调用"仅指重放步；终稿仍 1 次模型调用（与现行 3 消息 stub 调用数同），收益是完整上下文与审计语义，勿外推为 token 节省
+- **Steelman:** The bugs are real and enumerated (verified above); the plan correctly rejects fingerprinting wrong outputs as standard (contrast `tests/test_engine_fingerprint.py`, which is appropriate for coupon whose math was *not* declared buggy); synthetic minimal tests with business expectations are the right *correctness* gate.
+- **Fails if:** bug fixes interact (annualization fix changes every headline number; tier fix changes the goods view; UV fix turns a 500 into numbers) and the only net is a handful of synthetic cases — then a *new* error introduced by a fix ships undetected, and the user's existing `workspace/forecast/output/目标测算报告.xlsx` (built on ~58k real order rows, 天猫/京东/抖音/私域） disagrees with new numbers with no per-line explanation. "不指纹化" is right as a *standard*, but the plan throws away the fingerprint as a *diff tool* — there is no characterization net for the forecast engine at all (only 7 core + 7 pipeline tests, shape-level).
+- **Evidence to get this week:** snapshot the *current* pipeline's full outputs on the existing real workspace (one CLI run, save all CSVs/views as JSON); after each bug fix, diff and require every changed number to map to a named bug. This is a diff-map, not a standard — it answers "what exactly did fix #3 change for *my* data."
+- **Kill criterion:** any post-fix output delta on the real workspace that cannot be attributed to one of the five named bugs → stop, the fix set is not understood.
+- **Cheapest test:** ~1 hour: run `main.py run` today, freeze outputs; write the five minimal failing tests; confirm each fails for the *named* reason (I already confirmed #1 and #2 fail in-memory).
 
-## What's Well-Reasoned
+**2. (Claim a) "Manual, AI, and CLI edits converge on one business update entry and one identity store — this round."**
 
-- base 路径可达判断正确（不引入 0.4.0 重契约，T3 全链路）
-- 两身份 execute 成立（digest 不含闭包；/chat 写闭包永不执行、/resume 闭包绑 call_id 代理 exec_write + 名门禁 + 一次性弹出，与 test_confirm_executes_write_once 同构）
-- Echo 双模零改动可行（分支键 = _pending 条目有无 checkpoint 字段；Echo/直连测试构造均不含该键）
-- 怀疑点选得准（开放问题 1/2/4 恰是三面承重墙）
+- **Steelman:** the domain model (§5 table) is coherent; coupon_tool/storage.py already proves run-identity-by-content-digest works in this repo; the workbench plugin architecture gives one chokepoint (`/t/forecast/api/`) to hang the entry on.
+- **Fails if:** the incumbent write paths are not actually closable this round. Today there are **four** independent param truths: `config.yaml` (CLI + server defaults), `assistant_params.json` (AI writes via `AssistantParamsStore.merge`, `tools_common/httpkit.py:115-121` — non-atomic `write_text`), UI in-browser edits (stateless `POST /api/calc`, `server.py:183-187` — note the UI calc path never merges `assistant_params`; only the assistant executor `_exec_forecast_set_scenario_params` does), and `main.py run_flow` which *mutates* `cfg["caliber"]` in place (documented deliberate hack, `pipeline.py:8-11`). The compat section (§7) *requires* the old paths to keep working in a transition period, and phase E (coupon/ROI adoption) is explicitly deferred — so "one entry" is true only inside the new forecast flow while the old CLI keeps producing un-versioned fixed-name outputs (`output/目标测算报告.xlsx`, the exact "last CLI output" path §6-B says must die). The risk is not design confusion; it's that the transition state *is the steady state*, and the product promise ("页面、CLI 和报告读取同一个明确的方案或运行身份", §1) is quietly redefined to "new stuff only."
+- **Evidence to get this week:** a one-page write-path inventory decision: for each of the 4 paths, either "routes through the new entry by date X" or "explicitly legacy, blocked from creating *new* plans/runs" — and specifically decide whether `main.py run` creates a run in the new store or is frozen to legacy.
+- **Kill criterion:** phase B demo-able with CLI still writing new un-versioned outputs *and* no deprecation gate → the single-entry claim is dead; restate scope before proceeding to UI.
+- **Cheapest test:** half a day of design spike: implement the draft store + one `apply_patch(draft_id, base_revision, patch)` function and point *both* the HTTP route and a CLI shim at it; if the CLI shim can't reuse it without rearchitecture, the abstraction is wrong *now*, at zero UI cost.
 
-## 未及评估
+**3. (Claim d) "The approved 5-view demo becomes the real UI without diluting approved interactions."**
 
-- MIMO 真身下恢复轮终稿措辞质量（mimo-chat thinking blocks 透传）——只能真实冒烟回答
-- 长会话 checkpoint 逼近 2MB 的速度（exec_read result 全量进 messages）——超限表现为恢复失败，可加长度守卫降级
-- 固定确认文案的体验裁定（产品决策，preview 已兜底）
+- **Steelman:** vanilla-JS-to-vanilla-JS, no framework migration; the demo's `app.js` (44.4KB approved) already implements the views, dialogs, keyboard, narrow-screen behavior; §0.5/§6-C explicitly forbid "demo 只是原型" simplification.
+- **Fails if:** two structural mismatches force interaction changes the approval never covered. **(i) Hosting chrome:** the incumbent workbench shell (`workbench/static/index.html`) already owns a sidebar ("TOOLS · 测算工具") + topbar + assistant drawer and embeds tools via iframe; the approved demo *is* a full chrome (230px sidebar/64px topbar/286px assistant, §8). Embedding → double sidebar/topbar/assistant (obvious dilution); replacing shell behavior for one tool → touches the shared surface coupon/ROI render through, colliding with "保留优惠券和 ROI 现有行为" (§0/E). **(ii) Synchronicity:** the demo computed in-browser with simulated latency/failure (A09 "确定性延迟与故障演示"); the real path is xlsx ingest (~1MB×3 files) + engine on stdlib `ThreadingHTTPServer` with **no job registry, no cancellation token** anywhere in the codebase. The required 6-state async model （准备不足/计算中/已完成/失败/已取消/执行结果未知， §4.4) is new infrastructure whose UX was never in the approved demo.
+- **Evidence to get this week:** (i) drop `demo.html` into the current shell iframe at 1440px and 390px, screenshot — double chrome is visible in an hour; decide shell strategy on that evidence. (ii) a spike: cancellable job on `ThreadingHTTPServer` (thread + cancel flag + polling endpoint) — proves or kills the cancel interaction before the UI is wired.
+- **Kill criterion:** approved layout can only be preserved by modifying the shared shell in ways that alter coupon/ROI chrome → hard constraint conflict; escalate to user rather than choosing silently. Also kill the *async design* (not the project) if cancel mid-ingest can't be made honest — then A09's "可停止" must be renegotiated as "可放弃等待" before building.
+- **Cheapest test:** the iframe screenshot (1 hour) + a 1-file cancel spike (half a day).
 
-## 裁定：GO
+**4. (Claim f) "AI via the pi sidecar can be validated by contract tests alone, with real paid calls deferred."**
 
-核心机制在 base 0.4.3 公开面实证走通（T3）；硬约束全部可满足。但提案第 1 要点按字面实现必死（A1），A2-A5 为四条强制修正：①stash 规则改"pending 未确认的第一份 ready"；②/resume 只按 call_id 查 sidecar 自有 stash；③多写批次非首个良性取消；④/chat 与 /resume 构造字节一致（不变量+测试）；⑤sidecar 不可达降级现行路径、超时不自动执行。
+- **Steelman:** the contract-test path genuinely exists: `assistant-sidecar/src/server.ts:168` accepts an injected `ModelTransport`, and `test/checkpoint.test.ts` already drives the whole blocked→stash→/resume→exec_write loop with a fake transport. "AI 未配置时手动流程完整可用" (§0.6) caps the blast radius. Not calling paid models without authorization is correct.
+- **Fails if:** the first real-model run happens after the new proposal machinery is built on top of it. Two unpriced unknowns compound: **(i)** the sidecar *flattens* all history into a plain-text prompt (`server.ts:91-101`, tool results become `工具 X 返回：…` lines) — whether the real MIMO endpoint reliably emits *patch-shaped* tool calls under this lossy encoding is unknown even for today's 3-field `set_scenario_params`, let alone revision-bound proposals with 旧值/新值/理由/影响范围； **(ii)** the staleness requirement (A06, 提案基于旧修订拒绝覆盖） lands on the newest, most churned code in the repo — 3 of the last 5 commits are (c)-resume edge-case fixes, and the stash binds proposals to *conversation checkpoints*, not *business revisions*; the revision check must be threaded sidecar→shell→`exec_write` against the draft store. Note also `/health` hardcodes `sdk: "pi-agent-runtime@0.4.3"` (`server.ts:337`) while the symlink resolves to `0.5.3-harness.3` — the version-identity drift the plan warns about is *already baked into a health endpoint any contract test will pin*.
+- **Evidence to get this week:** ask the user to authorize **one** real-key smoke of the *existing* sidecar (it's built; `dist/` present; node v24.21.0 present): prompt "把挑战情景新客增速调到 20%" and inspect whether the staged proposal is well-formed. This tests the model loop *before* the new contract depends on it, and costs one request.
+- **Kill criterion:** if the real smoke shows malformed/unreliable tool calls on the *current simple* write tool, or authorization is refused → descope AI to manual-first this round (ship A01–A03, A07–A15; mark A04–A06 "contract-tested only"), rather than building the richer proposal pipeline on an unverified loop.
+- **Cheapest test:** the one-request smoke above; zero if refused — that refusal *is* the test result.
+
+**5. (Meta/scope) "Phases A–D plus A01–A15 acceptance fit in one auto flow (60 turns / 12h) with no intermediate shippable gate."**
+
+- **Steelman:** the user instruction says "持续执行到经营目标测算闭环完成" and phasing A→B→C→D sequences the risk correctly; the repo has done multi-stage flows before (5 stage archives from 2026-10-15).
+- **Fails if:** the scope is 2–4× the budget: 5 engine fixes + business-expectation tests, a new persistence/domain layer, a 44.4KB-UI rewire with real upload/mapping/async/cancel, AI proposal semantics on churned code, compat imports, and browser acceptance across desktop/narrow/dark/keyboard. Prior flows in this repo each delivered *one* stage (httpkit, pipeline, routes, engine-split…); this proposal is roughly five of those at once, with "闭环完成" as the only exit and no defined cut-line if the budget burns out mid-phase-C — the worst end state is demo replaced, backend half-wired.
+- **Evidence to get this week:** a bottom-up `tasks.md` with per-task turn estimates *before* phase A starts (the flow already maintains this artifact — `.flow/archive/*/tasks.md` precedent).
+- **Kill criterion:** if honest estimate > ~1.5× budget, cut now with an explicit pre-agreed descope order (suggestion: D-AI real-wiring first, file-upload wizard second — CLI import path already satisfies 数据准备） — the failure is not overrunning, it's overrunning *without* a pre-agreed cut line.
+- **Cheapest test:** the estimate itself; 1 hour.
+
+### Secondary watch-list (real, but lower on impact × likelihood × cheapness)
+
+- **(Claim b) Disk persistence mechanics.** Technically the easiest part: single-user local files, `write tmp + os.replace`, content-hash identity — but note *no* in-repo precedent actually does atomic writes (`AssistantParamsStore.save` is a plain `write_text`; `coupon_tool/storage.py` has run-identity but no atomic rename), and Excel exports via `pd.ExcelWriter` are non-atomic by nature — a crash mid-export leaves a corrupt file that must be detectable as such (ties into A12/导出重试）. Cheap test: `kill -9` mid-write, reopen. The subtler risk is *identity semantics* (revision counters vs content hashes, and the invalidation propagation draft→confirmation→run→export), which is covered by assumption 2's spike.
+- **(Claim e) Compat surface is thinner than the proposal implies — mostly good news.** `workspace/forecast/assistant_params.json` **does not exist** (nothing to merge-preview); the workspace has no same-stem A/B conflict (so that UI path needs a synthetic fixture or it ships untested); `workbench/migrate.py` already proves plan/apply migration with conflict-skip. Residual: old `output/目标测算报告.xlsx` labeling is trivial. Watch one thing: the "从现有配置创建方案" import must record provenance *and freeze* — otherwise config.yaml edits keep leaking into saved plans, re-opening assumption 2.
+- **Per-platform target-month misalignment** (engine computes `_target_month_labels` from each platform's own max month; `consolidate` merges by month) is inside the plan's "平台时间覆盖" item but is the bug most likely to produce *plausible-looking* wrong consolidated totals rather than a crash — include it in the diff-map of assumption 1.
+
+### What's Well-Reasoned
+
+- **The problem list is true.** All five named engine bugs confirmed (two reproduced live above, three by direct code reading). This is not a plan attacking imaginary rot.
+- **Rejecting fingerprint-as-standard while the repo keeps fingerprint-as-refactor-guard for coupon** (`tests/test_engine_fingerprint.py`, whose docstring explains *why*: mutation experiments proved behavioral tests alone pass wiring drift) shows the plan understands the difference — the gap is only that it discards the diff tool along with the standard (assumption 1).
+- **"AI absent → manual flow complete" is the right blast-radius cap**, and the sidecar's existing fake-transport test seam means contract tests are honest, not theater.
+- **Deferring coupon/ROI (phase E) while keeping their behavior untouched** is correct sequencing; the repo's own precedent (`coupon_tool/storage.py` run-identity, `workbench/migrate.py` plan/apply, `tools_common/httpkit.py` consolidation) means the new mechanisms have in-repo templates — this is evolutionary, not greenfield.
+- **The invalidation/idempotency requirements** （过期提案拒绝， 重复确认不重复执行， 执行结果未知先查状态） are not aspirational — they restate semantics the (c)-resume work already paid for, so the acceptance bar is calibrated to demonstrated capability.
+
+### What I Couldn't Assess
+
+- **The approved demo's internals** (`demo.html`/`app.js` live in `/Users/huangbo/Documents/...`, outside the repo and outside my allowed inputs). Claims about which interactions are async-safe, and how much of A01–A15 the demo's `model.js` fakes synchronously, are taken from the proposal's own §9 table — assumption 3's screenshot test exists precisely to close this gap cheaply.
+- **pi-agent-runtime 0.5.3-harness.3's behavioral deltas vs 0.4.3** beyond what the sidecar's tests exercise (the runtime lives outside the repo; the proposal itself flags this, §A).
+- **Whether the user will authorize even a single real-model smoke** — assumption 4's kill path depends on the answer either way.
+- **Why the workspace holds demo-shaped data with a real-looking output report** — if that report is actually user-valued (not demo residue), the old-artifact labeling in §7 matters more than the plan assumes.
+
+VERDICT: go

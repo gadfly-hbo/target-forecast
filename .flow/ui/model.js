@@ -1,0 +1,21 @@
+/* Review demo only. Deterministic scenario arithmetic, no production engine or model requests. */
+(function(root){
+ 'use strict';
+ const clone=o=>JSON.parse(JSON.stringify(o));
+ const now=()=>new Date().toISOString();
+ const names=['保守','基准','挑战'];
+ const fields=[['new','新客人数增速'],['value','新客人均产出增速'],['old','老客月活增速'],['freq','老客复购频次增速'],['aov','老客客单增速'],['goods','商品结构增速']];
+ const defaults={保守:{new:6,value:0,old:0,freq:2,aov:0,goods:3},基准:{new:12,value:1,old:2,freq:5,aov:1,goods:10},挑战:{new:20,value:2,old:4,freq:9,aov:2,goods:18}};
+ function create(need){return {id:'plan-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),title:'2027 年全渠道经营目标',need,goal:1280,start:'2027-01',months:12,scope:'天猫、抖音',revision:1,created:now(),updated:now(),data:null,caliber:false,confirmed:false,params:clone(defaults),selected:'基准',notes:'新客增长来自获客计划；复购增长来自会员运营。均为待业务验证的假设。',preview:null,versions:[],runs:[],changes:[]};}
+ function dataset(){return {name:'2026 年平台月度经营数据（示例）',source:'合成演示',period:'2026-01 — 2026-12',rows:24,shares:[.065,.06,.07,.075,.08,.095,.075,.08,.08,.085,.135,.1],platforms:[{name:'天猫',base:720,newShare:.36},{name:'抖音',base:360,newShare:.38}],unit:'万元',synthetic:true};}
+ function payload(p){return {title:p.title,need:p.need,goal:p.goal,start:p.start,months:p.months,scope:p.scope,data:clone(p.data),caliber:p.caliber,confirmed:p.confirmed,params:clone(p.params),selected:p.selected,notes:p.notes};}
+ function key(p){return JSON.stringify(payload(p));}
+ function change(p,patch,source,description){Object.assign(p,clone(patch));p.revision++;p.updated=now();p.changes.unshift({time:now(),source,description,revision:p.revision});p.changes=p.changes.slice(0,30);}
+ function issues(p){let out=[];if(!p.need.trim())out.push('请说明这次测算要回答的问题');if(!Number.isFinite(p.goal)||p.goal<=0)out.push('目标金额必须大于 0');if(!p.data)out.push('请准备本次测算数据');if(!p.caliber)out.push('请确认数据口径');if(!p.confirmed)out.push('请确认本次用于试算的假设');return out;}
+ function calculate(p){const errors=issues(p);if(errors.length)throw Error(errors.join('；'));const base=p.data.platforms.reduce((s,x)=>s+x.base,0);const shares=p.data.shares||Array(12).fill(1/12);let results={};for(const name of names){const a=p.params[name];let platforms=p.data.platforms.map(x=>{const n=x.base*x.newShare*(1+a.new/100)*(1+a.value/100);const o=x.base*(1-x.newShare)*(1+a.old/100)*(1+a.freq/100)*(1+a.aov/100);return {name:x.name,base:x.base,newGMV:n,oldGMV:o,total:n+o};});let total=platforms.reduce((s,x)=>s+x.total,0),goods=base*(1+a.goods/100);results[name]={name,total,growth:(total/base-1)*100,gap:total-p.goal,goods,deviation:(goods/total-1)*100,platforms,monthly:shares.map((share,i)=>({month:`2027-${String(i+1).padStart(2,'0')}`,value:total*share,baseline:base*share}))};}return {created:now(),inputKey:key(p),draftRevision:p.revision,snapshot:payload(p),base,results,engine:'prototype-person-1.0',synthetic:true};}
+ function stale(p){return !!p.preview && p.preview.inputKey!==key(p);}
+ function saveRun(p){if(!p.preview||stale(p))throw Error('当前方案已变化，请重新计算后保存');const prev=p.runs.find(r=>r.inputKey===p.preview.inputKey);if(prev)return {run:prev,duplicate:true};let version=p.versions.find(v=>v.inputKey===p.preview.inputKey);if(!version){version={name:'v'+(p.versions.length+1)+'.0',created:now(),inputKey:p.preview.inputKey,snapshot:clone(p.preview.snapshot)};p.versions.push(version);}const run={...clone(p.preview),id:`RUN-${String(p.runs.length+1).padStart(3,'0')}`,planId:p.id,version:version.name,selected:p.selected,saved:now()};p.runs.unshift(run);return {run,duplicate:false};}
+ function exportJSON(run){return JSON.stringify({artifact:'经营目标测算演示记录',prototype:true,scope:'仅用于 UI 审核；合成数据与简化测算',run},null,2);}
+ function csv(run){const n=run.selected;const rows=[['演示数据','非真实经营预测'],['运行',run.id],['方案版本',run.version],['采用情景',n],['目标（万元）',run.snapshot.goal],['测算（万元）',run.results[n].total.toFixed(2)],[],['月份','情景','主口径GMV（万元）']];for(const name of names)for(const m of run.results[name].monthly)rows.push([m.month,name,m.value.toFixed(4)]);return '\uFEFF'+rows.map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\r\n');}
+ const api={clone,names,fields,defaults,create,dataset,payload,key,change,issues,calculate,stale,saveRun,exportJSON,csv};root.ForecastModel=api;if(typeof module!=='undefined')module.exports=api;
+})(typeof window!=='undefined'?window:globalThis);

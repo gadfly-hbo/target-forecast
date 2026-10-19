@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Target Forecast · 经营目标测算</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<a class="skip" href="#main">跳到工作区</a>
+<div class="app">
+ <aside id="sidebar" class="sidebar" aria-label="主导航">
+  <div class="brand">Target<span>Forecast</span><p>经营目标测算</p></div>
+  <button class="btn new-plan" data-action="home">＋ 新建测算方案</button>
+  <nav class="nav-primary"><button class="nav-item" data-action="plans"><span aria-hidden="true">▤</span> 我的方案 <span id="plan-count" class="count">0</span></button><button class="nav-item" data-action="runs"><span aria-hidden="true">◷</span> 运行记录 <span id="run-count" class="count">0</span></button></nav>
+  <p class="nav-label">最近编辑</p><nav id="recent" class="recent" aria-label="最近编辑的方案"></nav>
+  <div class="sidebar-bottom"><div class="identity"><span class="avatar">我</span><div>个人工作空间<p class="fine">方案持续编辑 · 结果独立保存</p></div></div><a class="nav-item" href="方案.html" target="_blank">↗ 重构方案与审核说明</a><button class="nav-item small" data-action="reset">重置演示数据</button></div>
+ </aside>
+ <div class="workspace"><header class="topbar"><button class="icon-btn menu-toggle" data-action="menu" aria-label="展开导航" aria-controls="sidebar" aria-expanded="false">☰</button><div id="breadcrumb" class="breadcrumb">工作空间 <span>/</span> 开始测算</div><div class="top-actions"><span class="demo-label">交互原型 · 合成数据</span><button id="theme-toggle" class="icon-btn" data-action="theme" aria-label="切换暗色主题">◐</button><a href="方案.html" target="_blank" class="btn small quiet">查看方案 ↗</a></div></header><div id="storage-warning" class="notice warning" hidden role="alert"></div><main id="main" tabindex="-1"></main></div>
+</div>
+<dialog id="modal" aria-labelledby="modal-title"><div id="modal-content"></div></dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="model.js"></script><script src="app.js"></script>
+</body></html>

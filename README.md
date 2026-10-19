@@ -29,15 +29,17 @@
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 .venv/bin/python -m workbench serve  # 启动测算工作台（http://127.0.0.1:8300，左侧导航切工具）
-.venv/bin/python main.py demo        # 目标测算：生成演示数据并跑通全流程（先看这个）
-.venv/bin/python main.py run         # 目标测算：用 workspace/forecast/ 下的正式数据测算
+.venv/bin/python main.py demo        # 目标测算（旧版流程）：生成演示数据跑通旧管线
+.venv/bin/python main.py run         # 目标测算（旧版流程）：用 workspace/forecast/ 数据出旧版报表
+.venv/bin/python main.py plans       # 目标测算（v2 方案工作区）：方案列表；plan-create/plan-calc/
+                                     # plan-save/plan-export 见 --help
 .venv/bin/python -m coupon_tool demo # 优惠券测算：合成演示场景端到端
 .venv/bin/python -m pytest tests -q  # 全部测试（核心不变量 + 工作台冒烟）
 ```
 
 ## 测算工作台底座（workbench/）
 
-两个测算工具跑在同一套底座上：**单一壳服务（单端口）+ 工具注册表 + 导航壳**。壳负责路由分发（`/t/{tool_id}/...` 剥离前缀后交给工具）、静态托管、工具导航；各工具的测算引擎与前端业务逻辑独立自治。新增测算工具（如投放 ROI）只需写一个引擎包 + `plugin.py` manifest（id/name/icon/static_dir/handle_get/handle_post，可选 seed_demo），在 `workbench/server.py` 注册表中登记即可，不改底座。
+三个测算工具跑在同一套底座上：**单一壳服务（单端口）+ 工具注册表 + 导航壳**。壳负责路由分发（`/t/{tool_id}/...` 剥离前缀后交给工具）、静态托管、工具导航；各工具的测算引擎与前端业务逻辑独立自治。新增测算工具（如投放 ROI）只需写一个引擎包 + `plugin.py` manifest（id/name/icon/static_dir/handle_get/handle_post，可选 seed_demo/standalone/actions），在 `workbench/server.py` 注册表中登记即可，不改底座。standalone=True 的工具（目标测算）从壳导航整页跳转（自带完整 chrome，不进 iframe），其余工具保持 iframe 装载。
 
 ```
 启动测算工作台.command            唯一入口（旧 .command 为兼容直达入口）
@@ -56,9 +58,9 @@ roi_tool/plugin.py               投放 ROI 测算插件适配（/t/roi/）
 
 多投放计划的盈亏测算：单计划按「点击=消耗÷CPC → 订单=点击×CVR → GMV=订单×客单 → 净贡献=GMV×(1−退款)×毛利率−消耗」核算，输出 ROI、保本转化率与净贡献结论（「净亏损」允许成为结论）；保守/基准/挑战三档情景对转化率与客单施加增速，检验结论对假设的敏感度；多计划并排比较、按净贡献排名。**演示计划为合成假设，非行业真值、非经营建议。**
 
-各工具的独立入口（`main.py serve`、`python -m coupon_tool serve`）保留可用，前端 API 全部相对路径，独立运行与壳内运行行为一致。manifest 预留 `actions` 字段（机器可读能力声明），为未来 LLM 驱动（pi agent sdk）接入预留接口。
+各工具的独立入口（`main.py serve`、`python -m coupon_tool serve`）保留可用，工具内业务 API 全部相对路径，独立运行与壳内运行行为一致（目标测算右栏助手经壳级 `/api/assistant/*`，standalone 运行时如实降级为「无助手」）。manifest 的 `actions` 字段是机器可读能力声明，供 LLM 助手（pi agent sdk）调用。
 
-**数据布局**：所有工具数据收编在 `workspace/{tool_id}/` 下（`workspace/forecast/{orders,metrics,output}`、`workspace/coupon/{scenarios,runs,…,output}`），不入 git。旧版顶层的 `data/`、`coupon_data/`、`output/` 在首次启动时由启动脚本自动无损迁移（`python -m workbench migrate`，幂等；目标已存在且内容不同的文件会跳过并提示，绝不覆盖）。导出下载统一在 `/t/{id}/api/export/...`：目标测算报表与中间指标、优惠券三格式导出均可直接在浏览器下载。
+**数据布局**：所有工具数据收编在 `workspace/{tool_id}/` 下（`workspace/forecast/{orders,metrics,output}`、方案与运行在 `workspace/forecast/v2/`，`workspace/coupon/{scenarios,runs,…,output}`），不入 git。旧版顶层的 `data/`、`coupon_data/`、`output/` 在首次启动时由启动脚本自动无损迁移（`python -m workbench migrate`，幂等；目标已存在且内容不同的文件会跳过并提示，绝不覆盖）。导出下载统一在 `/t/{id}/api/export/...`：目标测算报表与中间指标、优惠券三格式导出均可直接在浏览器下载。
 
 ## 测算助手（P3，LLM 驱动）
 
@@ -74,14 +76,27 @@ roi_tool/plugin.py               投放 ROI 测算插件适配（/t/roi/）
 
 ## 本地工作台（main.py serve）
 
-浏览器打开 `http://127.0.0.1:8300`（`--port` 可换端口）。数据与测算全部在本机完成，`workspace/forecast/` 为空时自动生成演示数据。
+浏览器打开 `http://127.0.0.1:8300`（`--port` 可换端口）。数据与测算全部在本机完成。
 
-- **左栏**：全渠道 / 各平台视图切换（标注模式A/B）
-- **中央**：情景切换（保守/基准/挑战）、交叉校验横幅（任一视角与主口径差 >5% 会 ⚠）、KPI、月度 GMV 堆叠图（新客/老客）、三视角校验表、商品结构、月度明细
-- **右栏 Inspector**：当前情景的人/场/货三组增速参数，改动后防抖自动重算（调参 → 看数 → 校验的核心闭环）；「口径说明」页签常驻各条口径
-- **底部状态栏**：数据源、演示/正式标记、最近测算时间、本机运行声明
+目标测算是 **v2 方案工作区**（整页应用，`target_forecast/static/v2/`）：每份方案一份持续编辑的
+工作稿，五步流程「目标与范围 → 数据与口径 → 假设与情景 → 计算与比较 → 保存与导出」。
 
-后端为标准库 `http.server` + JSON API（`/api/state`、`/api/calc`），无新增依赖；前端无框架、无 CDN 依赖，离线可用。
+- **数据**：真实 xlsx 两阶段导入（订单明细模式A / 平台月度指标模式B），或「载入示例数据」走
+  同一导入管道（全程「演示数据」标记）；也可从 `workspace/forecast/{orders,metrics}` 目录读取
+- **口径与假设**：三域确认（数据覆盖/口径/假设）按内容哈希派生失效；三档情景共用一份数据，
+  任何修改使旧结果过期并明确提示重算
+- **计算与结果**：一次计算三档（异步 job，可停止），结果表/月度图/平台贡献 + 人货交叉校验；
+  结果是「给定假设下的情景推演」，不宣称推荐
+- **保存与导出**：保存固定方案版本+数据快照+三档结果（重复保存去重）；导出 Excel/CSV/JSON
+  绑定指定运行，失败可重试不重新计算；旧版 `workspace/forecast/output/` 产物在「旧版产物」区
+  只读列出（未关联新运行）
+- **AI 助手**（右侧栏，可选）：同一份工作稿上的提案双轨——AI 只生成参数调整提案（dry-run
+  差异卡），采纳/放弃由用户显式决定；未配置模型或 standalone 运行时如实降级，手动流程不受影响
+
+后端为标准库 `http.server` + JSON API（`/api/v2/*`，见 `target_forecast/v2http.py`），
+无新增依赖；前端无框架、无 CDN 依赖，离线可用。旧版 `/api/state`、`/api/calc`、
+`/api/assistant_params` 已退役（404 指向 v2）；`main.py demo/run` 为冻结的旧版流程，产物标注
+「旧版产物，未关联新运行」。方案数据在 `workspace/forecast/v2/`（原子写入，不入 git）。
 
 ## 两种数据模式
 
